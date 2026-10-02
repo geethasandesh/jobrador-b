@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { pingDatabase } from "../db/client.js";
 import {
   confirmLead,
   createLead,
@@ -27,38 +28,41 @@ export function createApp() {
     }),
   );
 
-  app.get("/v1/health", (c) => c.json({ ok: true, dataSource: "mock" }));
-
-  app.get("/v1/opportunities", (c) => {
-    const parsed = parseSearch(new URL(c.req.url));
-    if ("error" in parsed) return c.json(fail(parsed.error), 400);
-    return c.json(searchOpportunities(parsed));
+  app.get("/v1/health", async (c) => {
+    await pingDatabase();
+    return c.json({ ok: true, dataSource: "mock", database: "supabase" });
   });
 
-  app.get("/v1/jobs/:id", (c) => {
+  app.get("/v1/opportunities", async (c) => {
+    const parsed = parseSearch(new URL(c.req.url));
+    if ("error" in parsed) return c.json(fail(parsed.error), 400);
+    return c.json(await searchOpportunities(parsed));
+  });
+
+  app.get("/v1/jobs/:id", async (c) => {
     const originPoint = parseOrigin(new URL(c.req.url));
     if (originPoint && "error" in originPoint) return c.json(fail(originPoint.error), 400);
-    const job = getJob(c.req.param("id"), originPoint);
+    const job = await getJob(c.req.param("id"), originPoint);
     if (!job) {
       return c.json({ error: { code: "NOT_FOUND", message: "Job not found" } }, 404);
     }
     return c.json(job);
   });
 
-  app.get("/v1/leads/:id", (c) => {
+  app.get("/v1/leads/:id", async (c) => {
     const originPoint = parseOrigin(new URL(c.req.url));
     if (originPoint && "error" in originPoint) return c.json(fail(originPoint.error), 400);
-    const lead = getLead(c.req.param("id"), originPoint);
+    const lead = await getLead(c.req.param("id"), originPoint);
     if (!lead) {
       return c.json({ error: { code: "NOT_FOUND", message: "Community lead not found" } }, 404);
     }
     return c.json(lead);
   });
 
-  app.get("/v1/businesses/:id", (c) => {
+  app.get("/v1/businesses/:id", async (c) => {
     const originPoint = parseOrigin(new URL(c.req.url));
     if (originPoint && "error" in originPoint) return c.json(fail(originPoint.error), 400);
-    const business = getBusiness(c.req.param("id"), originPoint);
+    const business = await getBusiness(c.req.param("id"), originPoint);
     if (!business) {
       return c.json({ error: { code: "NOT_FOUND", message: "Business not found" } }, 404);
     }
@@ -74,7 +78,7 @@ export function createApp() {
     }
     const parsed = parseCreateLead(body);
     if ("error" in parsed) return c.json(fail(parsed.error), 400);
-    return c.json(createLead(parsed), 201);
+    return c.json(await createLead(parsed), 201);
   });
 
   app.post("/v1/leads/:id/confirmations", async (c) => {
@@ -86,7 +90,7 @@ export function createApp() {
     }
     const vote = parseVote(body);
     if (typeof vote !== "string") return c.json(fail(vote.error), 400);
-    const lead = confirmLead(c.req.param("id"), vote);
+    const lead = await confirmLead(c.req.param("id"), vote);
     if (!lead) {
       return c.json({ error: { code: "NOT_FOUND", message: "Community lead not found" } }, 404);
     }

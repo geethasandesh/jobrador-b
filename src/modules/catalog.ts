@@ -1,4 +1,15 @@
-import { mockBusinesses, mockJobs, mockLeads } from "../data/mock.js";
+import {
+  addConfirmation,
+  businessesInRadius,
+  findBusiness,
+  findJob,
+  findLead,
+  insertLead,
+  jobsForBusiness,
+  jobsInRadius,
+  leadsForBusiness,
+  leadsInRadius,
+} from "../db/records.js";
 import { distanceKm, roundKm } from "../lib/geo.js";
 import {
   hoursLabel,
@@ -20,10 +31,6 @@ import type {
   SearchQuery,
   Vote,
 } from "../types.js";
-
-const businesses: Business[] = mockBusinesses.map((business) => ({ ...business }));
-const jobs: Job[] = mockJobs.map((job) => ({ ...job }));
-const leads: CommunityLead[] = mockLeads.map((lead) => ({ ...lead }));
 
 const DATA_SOURCE = "mock" as const;
 
@@ -71,8 +78,8 @@ export type BusinessDetail = {
   leads: CommunityLead[];
 };
 
-function businessById(id: string): Business | undefined {
-  return businesses.find((business) => business.id === id);
+function businessById(list: Business[], id: string): Business | undefined {
+  return list.find((business) => business.id === id);
 }
 
 function toOpportunity(
@@ -137,13 +144,18 @@ function textMatches(query: string, parts: Array<string | undefined>): boolean {
   return parts.some((part) => part?.toLowerCase().includes(needle));
 }
 
-export function searchOpportunities(query: SearchQuery): OpportunityListResponse {
+export async function searchOpportunities(query: SearchQuery): Promise<OpportunityListResponse> {
+  const [businesses, jobs, leads] = await Promise.all([
+    businessesInRadius(query.latitude, query.longitude, query.radiusKm),
+    jobsInRadius(query.latitude, query.longitude, query.radiusKm),
+    leadsInRadius(query.latitude, query.longitude, query.radiusKm),
+  ]);
   const items: Opportunity[] = [];
 
   if (query.kinds.includes("job")) {
     for (const job of jobs) {
       if (job.status !== "ACTIVE") continue;
-      const business = businessById(job.businessId);
+      const business = businessById(businesses, job.businessId);
       if (query.jobType && job.jobType !== query.jobType) continue;
       if (query.category && job.category !== query.category) continue;
       if (query.language && !matchesLanguage(job.language, query.language)) continue;
@@ -335,10 +347,13 @@ export function searchOpportunities(query: SearchQuery): OpportunityListResponse
   };
 }
 
-export function getJob(id: string, origin?: { latitude: number; longitude: number }): JobDetail | null {
-  const job = jobs.find((item) => item.id === id);
+export async function getJob(
+  id: string,
+  origin?: { latitude: number; longitude: number },
+): Promise<JobDetail | null> {
+  const job = await findJob(id);
   if (!job) return null;
-  const business = businessById(job.businessId) ?? null;
+  const business = await findBusiness(job.businessId);
   return {
     dataSource: DATA_SOURCE,
     job: {
@@ -354,13 +369,13 @@ export function getJob(id: string, origin?: { latitude: number; longitude: numbe
   };
 }
 
-export function getLead(
+export async function getLead(
   id: string,
   origin?: { latitude: number; longitude: number },
-): LeadDetail | null {
-  const lead = leads.find((item) => item.id === id);
+): Promise<LeadDetail | null> {
+  const lead = await findLead(id);
   if (!lead) return null;
-  const business = lead.businessId ? businessById(lead.businessId) ?? null : null;
+  const business = lead.businessId ? await findBusiness(lead.businessId) : null;
   return {
     dataSource: DATA_SOURCE,
     lead: {
@@ -378,12 +393,13 @@ export function getLead(
   };
 }
 
-export function getBusiness(
+export async function getBusiness(
   id: string,
   origin?: { latitude: number; longitude: number },
-): BusinessDetail | null {
-  const business = businessById(id);
+): Promise<BusinessDetail | null> {
+  const business = await findBusiness(id);
   if (!business) return null;
+  const [jobs, leads] = await Promise.all([jobsForBusiness(business.id), leadsForBusiness(business.id)]);
   return {
     dataSource: DATA_SOURCE,
     business: {
@@ -399,20 +415,18 @@ export function getBusiness(
           )
         : null,
     },
-    jobs: jobs
-      .filter((job) => job.businessId === business.id)
-      .map((job) => ({
+    jobs: jobs.map((job) => ({
         ...job,
         salaryLabel: salaryLabel(job.salaryMin, job.salaryMax, job.salaryPeriod),
         distanceKm: origin
           ? roundKm(distanceKm(origin.latitude, origin.longitude, job.latitude, job.longitude))
           : null,
       })),
-    leads: leads.filter((lead) => lead.businessId === business.id),
+    leads,
   };
 }
 
-export function createLead(input: CreateLeadInput): LeadDetail {
+export async function createLead(input: CreateLeadInput): Promise<LeadDetail> {
   const lead: CommunityLead = {
     id: `lead_${Date.now().toString(36)}`,
     businessName: input.businessName,
@@ -435,19 +449,16 @@ export function createLead(input: CreateLeadInput): LeadDetail {
     hoursMin: input.hoursMin,
     hoursMax: input.hoursMax,
   };
-  leads.unshift(lead);
-  const detail = getLead(lead.id);
+  await insertLead(lead);
+  const detail = await getLead(lead.id);
   if (!detail) {
     throw new Error("Lead was saved but could not be read back");
   }
   return detail;
 }
 
-export function confirmLead(id: string, vote: Vote): LeadDetail | null {
-  const lead = leads.find((item) => item.id === id);
-  if (!lead || lead.status !== "ACTIVE") return null;
-  if (vote === "yes") lead.confirmYes += 1;
-  if (vote === "no") lead.confirmNo += 1;
-  if (vote === "unsure") lead.confirmUnsure += 1;
+export async function confirmLead(id: string, vote: Vote): Promise<LeadDetail | null> {
+  const lead = await addConfirmation(id, vote);
+  if (!lead) return null;
   return getLead(id);
 }

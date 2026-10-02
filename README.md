@@ -1,8 +1,10 @@
 # jobrador-b
 
-API for Student Job Map. The website in `jobrador-f` is the only client. This service owns search, labels, and stored facts.
+API for jobrador. The website in `jobrador-f` is the only client. This service owns search, labels, and stored facts.
 
-The current data is an in-memory Berlin sample. Every payload includes `"dataSource": "mock"`. Nothing here is a live vacancy.
+Places live only in Supabase Postgres with PostGIS. The API does not keep a copy of the listings in the repo. The current rows are still the Berlin sample, so every payload includes `"dataSource": "mock"`. Nothing here is a live vacancy.
+
+Copy `.env.example` to `.env` and set `DATABASE_URL` to the URI from Supabase: Project Settings → Database → Connection string. Use the session pooler or the direct connection. The API creates the tables on startup if they are missing.
 
 ## Run
 
@@ -38,9 +40,9 @@ Salary and language lines are omitted when the source did not provide them. Expi
 ```text
 src/http        request parsing and routes
 src/modules     search and record rules
-src/data        sample Berlin places
+src/db          Supabase connection, migration, and queries
 src/lib         distance and labels
-db/migrations   Postgres + PostGIS schema for later
+db/migrations   Postgres + PostGIS schema
 api/index.ts    Vercel serverless entry
 ```
 
@@ -48,7 +50,7 @@ api/index.ts    Vercel serverless entry
 
 ## Database
 
-`db/migrations/001_init.sql` is the future Supabase schema. The dev server does not connect to it yet. New leads and confirmation votes live in memory and reset when the process restarts.
+`db/migrations/001_init.sql` runs when the API starts. New leads and confirmation votes stay in Supabase.
 
 ## Deploy
 
