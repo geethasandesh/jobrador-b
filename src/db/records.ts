@@ -59,6 +59,7 @@ type LeadRow = {
   confirm_unsure: number;
   confirm_done: number;
   status: CommunityLead["status"];
+  poster: string | null;
   language_requirements: CommunityLead["language"] | null;
   salary_min: number | string | null;
   salary_period: "hour" | "month" | null;
@@ -149,6 +150,7 @@ function mapLead(row: LeadRow): CommunityLead {
     confirmUnsure: row.confirm_unsure,
     confirmDone: row.confirm_done ?? 0,
     status: row.status,
+    poster: row.poster === "business" ? "business" : "student",
     language: row.language_requirements ?? undefined,
     salaryMin: num(row.salary_min),
     salaryPeriod: row.salary_period ?? undefined,
@@ -189,7 +191,7 @@ export async function leadsInRadius(latitude: number, longitude: number, radiusK
   const area = origin(latitude, longitude, radiusKm);
   const rows = await getSql()<LeadRow[]>`
     select id, business_id, business_name, title, description, job_type, category, address, city, area,
-           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status,
+           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
            language_requirements, salary_min, salary_period, hours_min, hours_max
     from community_leads
     where status = 'ACTIVE'
@@ -223,7 +225,7 @@ export async function findJob(id: string) {
 export async function findLead(id: string) {
   const rows = await getSql()<LeadRow[]>`
     select id, business_id, business_name, title, description, job_type, category, address, city, area,
-           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status,
+           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
            language_requirements, salary_min, salary_period, hours_min, hours_max
     from community_leads
     where id = ${id}
@@ -269,7 +271,7 @@ export async function jobsNear(latitude: number, longitude: number, radiusKm = 0
 export async function leadsForBusiness(businessId: string) {
   const rows = await getSql()<LeadRow[]>`
     select id, business_id, business_name, title, description, job_type, category, address, city, area,
-           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status,
+           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
            language_requirements, salary_min, salary_period, hours_min, hours_max
     from community_leads
     where business_id = ${businessId}
@@ -282,7 +284,7 @@ export async function insertLead(lead: CommunityLead, accountId: string) {
     insert into community_leads (
       id, business_id, business_name, title, description, job_type, category, address, city, area,
       latitude, longitude, location, status, confirm_yes, confirm_no, confirm_unsure, confirm_done,
-      salary_min, salary_period, hours_min, hours_max, language_requirements, created_at, account_id
+      salary_min, salary_period, hours_min, hours_max, language_requirements, created_at, account_id, poster
     ) values (
       ${lead.id},
       ${lead.businessId ?? null},
@@ -308,7 +310,8 @@ export async function insertLead(lead: CommunityLead, accountId: string) {
       ${lead.hoursMax ?? null},
       ${lead.language ? getSql().json(lead.language) : null},
       ${lead.reportedAt},
-      ${accountId}
+      ${accountId},
+      ${lead.poster}
     )
   `;
 }
@@ -325,8 +328,8 @@ export async function countRecentLeads(accountId: string): Promise<number> {
 
 export async function addConfirmation(id: string, vote: Vote, accountId: string) {
   const db = getSql();
-  const existing = await db<{ account_id: string | null; status: string }[]>`
-    select account_id, status from community_leads where id = ${id} limit 1
+  const existing = await db<{ account_id: string | null; status: string; poster: string | null }[]>`
+    select account_id, status, poster from community_leads where id = ${id} limit 1
   `;
   const current = existing[0];
   if (!current || current.status === "REMOVED") return null;
@@ -371,7 +374,7 @@ export async function addConfirmation(id: string, vote: Vote, accountId: string)
     `;
     ownerSaidDone = ownerVote[0]?.status === "done";
   }
-  const filled = ownerSaidDone || tally.done >= 2;
+  const filled = current.poster === "business" ? ownerSaidDone : ownerSaidDone || tally.done >= 2;
   const status = filled ? "FILLED" : wasFilled ? "ACTIVE" : current.status;
 
   await db`
@@ -385,6 +388,37 @@ export async function addConfirmation(id: string, vote: Vote, accountId: string)
     where id = ${id}
   `;
   return { changed: true, wasFilled };
+}
+
+export async function leadsForAccount(accountId: string) {
+  const rows = await getSql()<LeadRow[]>`
+    select id, business_id, business_name, title, description, job_type, category, address, city, area,
+           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
+           language_requirements, salary_min, salary_period, hours_min, hours_max
+    from community_leads
+    where account_id = ${accountId}
+      and poster = 'business'
+      and status in ('ACTIVE', 'FILLED')
+    order by created_at desc
+  `;
+  return rows.map(mapLead);
+}
+
+export async function ownedLead(id: string) {
+  const rows = await getSql()<{ account_id: string | null; status: string }[]>`
+    select account_id, status from community_leads where id = ${id} limit 1
+  `;
+  return rows[0] ?? null;
+}
+
+export async function updateOwnedLead(id: string, accountId: string, status: "ACTIVE" | "FILLED" | "REMOVED") {
+  const rows = await getSql()<{ id: string }[]>`
+    update community_leads
+    set status = ${status}, updated_at = now()
+    where id = ${id} and account_id = ${accountId}
+    returning id
+  `;
+  return rows.length > 0;
 }
 
 export async function hasLiveJobs() {

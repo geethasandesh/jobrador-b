@@ -1,0 +1,119 @@
+import { createTransport } from "nodemailer";
+import { loadEnvFile } from "../db/env.js";
+
+function escapeHtml(value: string) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+function mailSettings() {
+  loadEnvFile();
+  const user = process.env.GMAIL_USER?.trim() ?? "";
+  const pass = (process.env.GMAIL_APP_PASSWORD ?? "").replace(/\s+/g, "");
+  if (!user || !pass) return null;
+  return { user, pass };
+}
+
+function siteOrigin() {
+  loadEnvFile();
+  return (process.env.FRONTEND_ORIGIN ?? "http://localhost:3000").split(",")[0]?.trim() || "http://localhost:3000";
+}
+
+export async function sendMail(input: { to: string; subject: string; html: string; replyTo?: string }) {
+  const config = mailSettings();
+  if (!config) return { error: "Email is not set up yet." };
+  const transport = createTransport({
+    service: "gmail",
+    auth: { user: config.user, pass: config.pass },
+  });
+  await transport.sendMail({
+    from: `jobrador <${config.user}>`,
+    to: input.to,
+    subject: input.subject,
+    html: input.html,
+    replyTo: input.replyTo,
+  });
+  return { ok: true as const };
+}
+
+export async function sendPasswordReset(email: string) {
+  loadEnvFile();
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
+  const supabaseUrl = (process.env.SUPABASE_URL ?? "https://auavlxwsnoegelrrehhy.supabase.co").replace(/\/$/, "");
+  const origin = siteOrigin();
+  if (!serviceKey || !mailSettings()) return { error: "Password email is not set up yet." };
+
+  let response: Response;
+  try {
+    response = await fetch(`${supabaseUrl}/auth/v1/admin/generate_link`, {
+      method: "POST",
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "recovery",
+        email,
+        redirect_to: `${origin}/login/update-password`,
+      }),
+    });
+  } catch {
+    return { error: "Could not create the reset link." };
+  }
+
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error_code?: string; msg?: string };
+    const code = `${body.error_code ?? ""} ${body.msg ?? ""}`.toLowerCase();
+    if (response.status === 404 || code.includes("not found") || code.includes("user_not_found")) {
+      return { ok: true as const };
+    }
+    return { error: "Could not create the reset link." };
+  }
+
+  const body = (await response.json()) as { action_link?: string; properties?: { action_link?: string } };
+  const link = body.properties?.action_link ?? body.action_link;
+  if (!link) return { error: "Could not create the reset link." };
+
+  const reportUrl = `${origin}/report-a-bug`;
+  const sent = await sendMail({
+    to: email,
+    subject: "Reset your jobrador password",
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #222; max-width: 560px;">
+        <h1 style="font-size: 22px;">Reset your password</h1>
+        <p>A password reset was requested for ${escapeHtml(email)}.</p>
+        <p><a href="${escapeHtml(link)}">Choose a new password</a></p>
+        <p>If you did not ask for this, you can ignore the email.</p>
+        <p style="margin-top: 28px; padding-top: 16px; border-top: 1px solid #e5e5e5; font-size: 14px;">
+          Something broken on the site? <a href="${escapeHtml(reportUrl)}">Report a bug</a>
+        </p>
+      </div>
+    `,
+  });
+  if ("error" in sent) return sent;
+  return { ok: true as const };
+}
+
+export async function sendBugReport(input: { message: string; email?: string; page?: string }) {
+  const config = mailSettings();
+  if (!config) return { error: "Bug reports are not set up yet. Email info@grahmind.com instead." };
+  const sent = await sendMail({
+    to: config.user,
+    replyTo: input.email,
+    subject: "jobrador bug report",
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #222; max-width: 560px;">
+        <h1 style="font-size: 22px;">Bug report</h1>
+        <p><strong>Page:</strong> ${escapeHtml(input.page || "Not given")}</p>
+        <p><strong>Reply to:</strong> ${escapeHtml(input.email || "Not given")}</p>
+        <p style="white-space: pre-wrap;">${escapeHtml(input.message)}</p>
+      </div>
+    `,
+  });
+  if ("error" in sent) return sent;
+  return { ok: true as const };
+}

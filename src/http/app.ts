@@ -1,22 +1,57 @@
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { loadEnvFile } from "../db/env.js";
 import { pingDatabase } from "../db/client.js";
 import {
   confirmLead,
   createLead,
+  listMyPosts,
+  manageOwnedLead,
   getBusiness,
   getJob,
   getLead,
   listingSource,
   searchOpportunities,
 } from "../modules/catalog.js";
-import { userFromRequest } from "./auth.js";
+import { optionalUser, userFromRequest } from "./auth.js";
 import { parseCreateLead, parseOrigin, parseSearch, parseVote } from "./parse.js";
 import { listFeaturedNotes, noteForDevice, parseWallNote, reactToNote, stickNote } from "../modules/wall.js";
+import { sendBugReport, sendPasswordReset } from "../email/mail.js";
 import { searchBerlinPlaces } from "../ingest/geocode.js";
+import { runIngest } from "../ingest/run.js";
 
 function fail(error: string, code = "BAD_REQUEST") {
   return { error: { code, message: error } };
+}
+
+const recentHits = new Map<string, number[]>();
+
+function limited(key: string, max: number, windowMs: number) {
+  const now = Date.now();
+  const recent = (recentHits.get(key) ?? []).filter((time) => now - time < windowMs);
+  if (recent.length >= max) return true;
+  recent.push(now);
+  recentHits.set(key, recent);
+  return false;
+}
+
+function clientAddress(header: string | undefined) {
+  return header?.split(",")[0]?.trim() || "local";
+}
+
+function readEmail(value: unknown) {
+  const email = typeof value === "string" ? value.trim() : "";
+  if (!email.includes("@") || email.length > 200 || /[\r\n]/.test(email)) return null;
+  return email;
+}
+
+function cronAuthorized(header: string | undefined) {
+  loadEnvFile();
+  const secret = process.env.CRON_SECRET?.trim() ?? "";
+  const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  if (!secret || token.length !== secret.length) return false;
+  return timingSafeEqual(Buffer.from(token), Buffer.from(secret));
 }
 
 export function createApp() {
@@ -39,7 +74,7 @@ export function createApp() {
 
   app.get("/v1/places", async (c) => {
     const query = c.req.query("q")?.trim() ?? "";
-    return c.json({ places: await searchBerlinPlaces(query) });
+    return c.json(await searchBerlinPlaces(query));
   });
 
   app.get("/v1/opportunities", async (c) => {
@@ -58,10 +93,17 @@ export function createApp() {
     return c.json(job);
   });
 
+  app.get("/v1/me/leads", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to see your posts.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    return c.json({ leads: await listMyPosts(user.id) });
+  });
+
   app.get("/v1/leads/:id", async (c) => {
     const originPoint = parseOrigin(new URL(c.req.url));
     if (originPoint && "error" in originPoint) return c.json(fail(originPoint.error), 400);
-    const lead = await getLead(c.req.param("id"), originPoint);
+    const accountId = await optionalUser(c.req.header("Authorization"));
+    const lead = await getLead(c.req.param("id"), originPoint, accountId);
     if (!lead) {
       return c.json({ error: { code: "NOT_FOUND", message: "Community lead not found" } }, 404);
     }
@@ -94,6 +136,29 @@ export function createApp() {
       return c.json(fail(created.error, created.status === 429 ? "TOO_MANY" : "BAD_REQUEST"), created.status as 429);
     }
     return c.json(created, 201);
+  });
+
+  app.post("/v1/leads/:id/manage", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to manage a post.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const action = body && typeof body === "object" ? (body as { action?: unknown }).action : null;
+    if (action !== "stop" && action !== "delete" && action !== "reopen") {
+      return c.json(fail("action must be stop, delete, or reopen"), 400);
+    }
+    const id = c.req.param("id");
+    if (!id) return c.json(fail("Post not found.", "NOT_FOUND"), 404);
+    const result = await manageOwnedLead(id, user.id, action);
+    if ("error" in result) {
+      const code = result.status === 403 ? "FORBIDDEN" : result.status === 404 ? "NOT_FOUND" : "BAD_REQUEST";
+      return c.json(fail(result.error ?? "Could not update that post.", code), result.status as 400 | 403 | 404);
+    }
+    return c.json(result);
   });
 
   app.get("/v1/wall", async (c) => {
@@ -154,6 +219,64 @@ export function createApp() {
       return c.json({ error: { code: "NOT_FOUND", message: "Community lead not found" } }, 404);
     }
     return c.json(lead);
+  });
+
+  app.post("/v1/auth/forgot-password", async (c) => {
+    const address = clientAddress(c.req.header("x-forwarded-for"));
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const email = readEmail(body && typeof body === "object" ? (body as { email?: unknown }).email : "");
+    if (!email) return c.json(fail("Use the email on the account."), 400);
+    if (limited(`reset:${email}:${address}`, 3, 60 * 60 * 1000)) {
+      return c.json(fail("Too many reset emails. Try again later.", "TOO_MANY"), 429);
+    }
+    const sent = await sendPasswordReset(email);
+    if ("error" in sent && sent.error) return c.json(fail(sent.error, "UNAVAILABLE"), 503);
+    return c.json({ ok: true });
+  });
+
+  app.post("/v1/bugs", async (c) => {
+    const address = clientAddress(c.req.header("x-forwarded-for"));
+    if (limited(`bug:${address}`, 5, 60 * 60 * 1000)) {
+      return c.json(fail("Too many bug reports. Try again later.", "TOO_MANY"), 429);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const record = body && typeof body === "object" ? (body as Record<string, unknown>) : {};
+    const message = typeof record.message === "string" ? record.message.trim() : "";
+    if (message.length < 10 || message.length > 2000) {
+      return c.json(fail("Describe the bug in 10 to 2000 characters."), 400);
+    }
+    let replyTo: string | undefined;
+    if (record.email != null && record.email !== "") {
+      const parsed = readEmail(record.email);
+      if (!parsed) return c.json(fail("That email address does not look right."), 400);
+      replyTo = parsed;
+    }
+    const page = typeof record.page === "string" ? record.page.trim().slice(0, 200) : "";
+    const sent = await sendBugReport({ message, email: replyTo, page });
+    if ("error" in sent && sent.error) return c.json(fail(sent.error, "UNAVAILABLE"), 503);
+    return c.json({ ok: true });
+  });
+
+  app.get("/v1/ingest", async (c) => {
+    if (!cronAuthorized(c.req.header("Authorization"))) {
+      return c.json(fail("This ingest run is not authorized.", "UNAUTHORIZED"), 401);
+    }
+    try {
+      return c.json(await runIngest());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Ingest failed";
+      return c.json(fail(message), 500);
+    }
   });
 
   app.notFound((c) =>

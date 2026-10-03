@@ -122,6 +122,7 @@ create index if not exists community_leads_location_idx on community_leads using
 alter table community_leads add column if not exists device_id text;
 alter table community_leads add column if not exists account_id text;
 alter table community_leads add column if not exists confirm_done integer not null default 0;
+alter table community_leads add column if not exists poster text not null default 'student';
 
 create table if not exists lead_confirmations (
   id uuid primary key default gen_random_uuid(),
@@ -202,3 +203,28 @@ create table if not exists sources (
   active boolean not null default true,
   last_checked_at timestamptz
 );
+
+-- The website uses the anon key only to sign in. These tables are reached through the API.
+-- With row level security on and no policies, the anon and authenticated keys cannot read or write them.
+do $$
+declare
+  name text;
+begin
+  foreach name in array array[
+    'users',
+    'businesses',
+    'place_fetches',
+    'jobs',
+    'community_leads',
+    'lead_confirmations',
+    'saved_jobs',
+    'reports',
+    'wall_notes',
+    'wall_reactions',
+    'sources'
+  ]
+  loop
+    execute format('alter table if exists public.%I enable row level security', name);
+    execute format('revoke all on table public.%I from anon, authenticated', name);
+  end loop;
+end $$;

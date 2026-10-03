@@ -11,8 +11,11 @@ import {
   jobsForBusiness,
   jobsInRadius,
   jobsNear,
+  leadsForAccount,
   leadsForBusiness,
   leadsInRadius,
+  ownedLead,
+  updateOwnedLead,
 } from "../db/records.js";
 import { distanceKm, roundKm } from "../lib/geo.js";
 import { isLocality, samePlaceName } from "../lib/place-name.js";
@@ -61,6 +64,7 @@ export type CreateLeadInput = {
   hoursMin?: number;
   hoursMax?: number;
   accountId: string;
+  poster: "student" | "business";
 };
 
 export type JobDetail = {
@@ -81,6 +85,7 @@ export type LeadDetail = {
     languageLabel: string | null;
     hoursLabel: string | null;
     distanceKm: number | null;
+    mine: boolean;
   };
   business: Business | null;
 };
@@ -127,6 +132,7 @@ function toOpportunity(
     linkedJobTitle?: string;
     linkedJobType?: string | null;
     linkedJobIds?: string[];
+    poster?: "student" | "business";
   },
   originLat: number,
   originLng: number,
@@ -159,6 +165,7 @@ function toOpportunity(
     linkedJobTitle: item.linkedJobTitle,
     linkedJobType: item.linkedJobType,
     linkedJobIds: item.linkedJobIds,
+    poster: item.poster,
   };
 }
 
@@ -329,6 +336,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             confirmYes: lead.confirmYes,
             confirmNo: lead.confirmNo,
             confirmUnsure: lead.confirmUnsure,
+            poster: lead.poster,
           },
           query.latitude,
           query.longitude,
@@ -479,14 +487,17 @@ export async function getJob(
 export async function getLead(
   id: string,
   origin?: { latitude: number; longitude: number },
-): Promise<LeadDetail | null> {
+  accountId?: string | null,
+): Promise<(LeadDetail & { lead: LeadDetail["lead"] & { mine: boolean } }) | null> {
   const lead = await findLead(id);
   if (!lead) return null;
+  const owner = await ownedLead(id);
   const business = lead.businessId ? await findBusiness(lead.businessId) : null;
   return {
     dataSource: await listingSource(),
     lead: {
       ...lead,
+      mine: Boolean(accountId && owner?.account_id === accountId),
       salaryLabel: salaryLabel(lead.salaryMin, undefined, lead.salaryPeriod),
       languageLabel: languageLabel(lead.language),
       hoursLabel: hoursLabel(lead.hoursMin, lead.hoursMax),
@@ -550,13 +561,20 @@ export async function createLead(
   input: CreateLeadInput,
 ): Promise<LeadDetail | { error: string; status: number }> {
   const recent = await countRecentLeads(input.accountId);
+  if (input.poster === "business" && !inBerlin(input.latitude, input.longitude)) {
+    return { error: "Posting a job is only open in Berlin.", status: 400 };
+  }
   if (recent >= DAILY_LEAD_CAP) {
-    return { error: "This account already shared three tips today.", status: 429 };
+    return {
+      error: input.poster === "business" ? "This account already posted three jobs today." : "This account already shared three tips today.",
+      status: 429,
+    };
   }
   const lead: CommunityLead = {
     id: `lead_${randomBytes(8).toString("hex")}`,
     businessName: input.businessName,
-    title: "Hiring tip",
+    title: input.poster === "business" ? "Now hiring" : "Hiring tip",
+    poster: input.poster,
     description: input.description,
     jobType: input.jobType,
     category: input.category,
@@ -577,7 +595,7 @@ export async function createLead(
     hoursMax: input.hoursMax,
   };
   await insertLead(lead, input.accountId);
-  const detail = await getLead(lead.id);
+  const detail = await getLead(lead.id, undefined, input.accountId);
   if (!detail) {
     throw new Error("Lead was saved but could not be read back");
   }
@@ -602,4 +620,37 @@ export async function confirmLead(
     notice = "Recorded. Hiring is marked finished when you shared it, or when two accounts say so.";
   }
   return { ...detail, notice };
+}
+
+function inBerlin(latitude: number, longitude: number) {
+  return latitude >= 52.33 && latitude <= 52.68 && longitude >= 13.05 && longitude <= 13.77;
+}
+
+export async function listMyPosts(accountId: string) {
+  const leads = await leadsForAccount(accountId);
+  return leads.map((lead) => ({
+    id: lead.id,
+    businessName: lead.businessName,
+    title: lead.title,
+    area: lead.area,
+    status: lead.status,
+    latitude: lead.latitude,
+    longitude: lead.longitude,
+    reportedAt: lead.reportedAt,
+  }));
+}
+
+export async function manageOwnedLead(id: string, accountId: string, action: "stop" | "delete" | "reopen") {
+  const row = await ownedLead(id);
+  if (!row) return { error: "Post not found.", status: 404 as const };
+  if (row.account_id !== accountId) {
+    return { error: "You can only manage a post from the account that created it.", status: 403 as const };
+  }
+  if (row.status === "REMOVED") return { error: "This post was deleted.", status: 400 as const };
+  if (action === "stop" && row.status !== "ACTIVE") return { error: "Hiring is already stopped.", status: 400 as const };
+  if (action === "reopen" && row.status !== "FILLED") return { error: "This post is not stopped.", status: 400 as const };
+  const next = action === "delete" ? "REMOVED" : action === "stop" ? "FILLED" : "ACTIVE";
+  const updated = await updateOwnedLead(id, accountId, next);
+  if (!updated) return { error: "You can only manage a post from the account that created it.", status: 403 as const };
+  return { ok: true as const, status: next };
 }

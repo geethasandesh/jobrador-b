@@ -42,11 +42,13 @@ src/http        request parsing and routes
 src/modules     search and record rules
 src/db          Supabase connection, migration, and queries
 src/lib         distance and labels
+src/ingest      listing ingest
 db/migrations   Postgres + PostGIS schema
-api/index.ts    Vercel serverless entry
+src/index.ts    local server. Its timer runs only while this process stays up.
+api/index.ts    Vercel entry
 ```
 
-`src/workers/` is intentionally absent until a permitted job source needs scheduled checks. Add that folder here. Do not start a third repo for it.
+On your own machine, `npm start` schedules ingest at 07:00 and 19:00 Berlin time. That timer stops when the process stops.
 
 ## Database
 
@@ -54,4 +56,8 @@ api/index.ts    Vercel serverless entry
 
 ## Deploy
 
-Vercel can host this repo as serverless functions. `vercel.json` rewrites every path to the Hono app in `api/index.ts`. Set `FRONTEND_ORIGIN` to the deployed website URL.
+Deploy this repo on Vercel. `vercel.json` sends every request to the Hono app and schedules `GET /v1/ingest` once a day at 05:00 UTC. On the free plan that is the limit: one run a day, sometime during that hour. In summer that is about 07:00 in Berlin. In winter it is about 06:00. A second run the same day is rejected on the free plan.
+
+In the Vercel project settings, set `DATABASE_URL`, `FRONTEND_ORIGIN`, and `CRON_SECRET`. Vercel attaches `CRON_SECRET` to the cron request. Without that value, the ingest route refuses to run. Do not commit the secret.
+
+The website in `jobrador-f` calls this API through `NEXT_PUBLIC_API_URL`.

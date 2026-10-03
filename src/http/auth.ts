@@ -1,6 +1,31 @@
-import { loadEnvFile } from "../db/env.js";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 type AuthUser = { id: string };
+
+function loadAuthEnv() {
+  const path = fileURLToPath(new URL("../../.env", import.meta.url));
+  if (!existsSync(path)) return;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) continue;
+    const key = trimmed.slice(0, separator).trim();
+    if (key !== "SUPABASE_URL" && key !== "SUPABASE_ANON_KEY" && key !== "NEXT_PUBLIC_SUPABASE_ANON_KEY") continue;
+    let value = trimmed.slice(separator + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+export async function optionalUser(header: string | undefined): Promise<string | null> {
+  if (!header?.startsWith("Bearer ")) return null;
+  const user = await userFromRequest(header);
+  return "id" in user ? user.id : null;
+}
 
 export async function userFromRequest(
   header: string | undefined,
@@ -9,7 +34,7 @@ export async function userFromRequest(
   const token = header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
   if (!token) return { status: 401, message: denied };
 
-  loadEnvFile();
+  loadAuthEnv();
   const supabaseUrl = (process.env.SUPABASE_URL ?? "https://auavlxwsnoegelrrehhy.supabase.co").replace(/\/$/, "");
   const apiKey = process.env.SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!apiKey) return { status: 503, message: "Login check is not configured." };

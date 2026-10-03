@@ -120,6 +120,7 @@ export type CommunityLead = {
   confirmUnsure: number;
   confirmDone: number;
   status: "ACTIVE" | "EXPIRED" | "REMOVED" | "FILLED";
+  poster: "student" | "business";
   language?: LanguageRequirement;
   salaryMin?: number;
   salaryPeriod?: "hour" | "month";
@@ -168,6 +169,7 @@ export type Opportunity = {
   linkedJobTitle?: string;
   linkedJobType?: string | null;
   linkedJobIds?: string[];
+  poster?: "student" | "business";
 };
 
 export type OpportunityListResponse = {

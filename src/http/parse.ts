@@ -121,6 +121,7 @@ export type CreateLeadBody = {
   salaryPeriod?: "hour" | "month";
   hoursMin?: number;
   hoursMax?: number;
+  poster: "student" | "business";
 };
 
 export function parseCreateLead(body: unknown): CreateLeadBody | ParseFail {
@@ -189,6 +190,13 @@ export function parseCreateLead(body: unknown): CreateLeadBody | ParseFail {
   const hoursMax = hours(input.hoursMax, "hoursMax");
   if (hoursMax && typeof hoursMax === "object") return hoursMax;
 
+  const poster = input.poster == null || input.poster === "" || input.poster === "student"
+    ? "student"
+    : input.poster === "business"
+      ? "business"
+      : null;
+  if (!poster) return { error: "poster must be student or business" };
+
   return {
     businessName,
     description,
@@ -202,6 +210,7 @@ export function parseCreateLead(body: unknown): CreateLeadBody | ParseFail {
     salaryPeriod,
     hoursMin: hoursMin as number | undefined,
     hoursMax: hoursMax as number | undefined,
+    poster,
   };
 }
 

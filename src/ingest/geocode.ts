@@ -28,10 +28,7 @@ export async function geocode(query: string) {
       },
       signal: AbortSignal.timeout(12_000),
     });
-    if (!response.ok) {
-      cache.set(key, null);
-      return null;
-    }
+    if (!response.ok) return null;
     const rows = (await response.json()) as Array<{ lat?: string; lon?: string }>;
     const row = rows[0];
     if (!row?.lat || !row.lon) {
@@ -46,7 +43,6 @@ export async function geocode(query: string) {
     cache.set(key, point);
     return point;
   } catch {
-    cache.set(key, null);
     return null;
   }
 }
@@ -123,14 +119,174 @@ function inBerlin(latitude: number, longitude: number) {
   return latitude >= 52.33 && latitude <= 52.68 && longitude >= 13.05 && longitude <= 13.77;
 }
 
+type PlaceHit = { label: string; latitude: number; longitude: number };
+type RankedPlace = PlaceHit & { name: string; berlin: boolean; kind: string };
+
+const placeCache = new Map<string, { places: PlaceHit[]; outsideBerlin: boolean }>();
+
+function fold(value: string) {
+  return value
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function levenshtein(left: string, right: string) {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    let previous = i - 1;
+    row[0] = i;
+    for (let j = 1; j <= right.length; j += 1) {
+      const current = row[j] ?? 0;
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      row[j] = Math.min(current + 1, (row[j - 1] ?? 0) + 1, previous + cost);
+      previous = current;
+    }
+  }
+  return row[right.length] ?? 0;
+}
+
+function closeName(query: string, name: string) {
+  const left = fold(query);
+  const right = fold(name);
+  if (!left || !right) return false;
+  if (left === right) return true;
+  return levenshtein(left, right) <= (left.length >= 8 ? 2 : 1);
+}
+
+function startsWord(query: string, name: string) {
+  const left = query.trim().toLowerCase();
+  const right = name.trim().toLowerCase();
+  if (!right.startsWith(left)) return false;
+  const next = right[left.length];
+  return next == null || /[^a-z0-9äöüß]/.test(next);
+}
+
+function mergePlaces(primary: PlaceHit[], extra: PlaceHit[]) {
+  const seen = new Set(primary.map((place) => place.label.toLowerCase()));
+  const merged = [...primary];
+  for (const place of extra) {
+    if (seen.has(place.label.toLowerCase())) continue;
+    seen.add(place.label.toLowerCase());
+    merged.push(place);
+  }
+  return merged.slice(0, 6);
+}
+
+function matchingAreas(needle: string) {
+  return BERLIN_AREAS.filter((place) => {
+    const area = place.label.split(",")[0] ?? place.label;
+    return startsWord(needle, area) || (needle.length >= 3 && area.toLowerCase().includes(needle));
+  }).slice(0, 6);
+}
+
+async function photonSearch(query: string, bias: boolean) {
+  const url = new URL("https://photon.komoot.io/api/");
+  url.searchParams.set("q", query);
+  url.searchParams.set("limit", "8");
+  if (bias) {
+    url.searchParams.set("lat", "52.52");
+    url.searchParams.set("lon", "13.405");
+  }
+  try {
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        "User-Agent": "jobrador/0.1 (berlin student job map)",
+      },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json()) as {
+      features?: Array<{
+        geometry?: { coordinates?: [number, number] };
+        properties?: { name?: string; district?: string; locality?: string; osm_value?: string };
+      }>;
+    };
+    const places: RankedPlace[] = [];
+    const seen = new Set<string>();
+    for (const feature of body.features ?? []) {
+      const [longitude, latitude] = feature.geometry?.coordinates ?? [];
+      const name = feature.properties?.name?.trim();
+      if (!name || latitude == null || longitude == null) continue;
+      const berlin = inBerlin(latitude, longitude);
+      const key = `${name.toLowerCase()}:${berlin}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const district = feature.properties?.district || feature.properties?.locality;
+      const label =
+        berlin && district && district.toLowerCase() !== name.toLowerCase() ? `${name}, ${district}` : berlin ? `${name}, Berlin` : name;
+      places.push({
+        label,
+        name,
+        latitude,
+        longitude,
+        berlin,
+        kind: feature.properties?.osm_value ?? "",
+      });
+    }
+    return places;
+  } catch {
+    return null;
+  }
+}
+
+async function nominatimPlace(query: string, local: PlaceHit[]) {
+  const postal = /^\d{5}$/.test(query);
+  const direct = await geocode(postal ? `${query} Berlin` : query);
+  if (direct && !inBerlin(direct.latitude, direct.longitude)) {
+    return { places: local.length > 0 ? local : [], outsideBerlin: local.length === 0 };
+  }
+  if (direct) {
+    const label = postal ? `${query}, Berlin` : `${query}, Berlin`;
+    return { places: mergePlaces([{ label, ...direct }], local), outsideBerlin: false };
+  }
+  if (postal) return { places: local, outsideBerlin: false };
+  const narrowed = await geocode(`${query}, Berlin`);
+  if (narrowed && inBerlin(narrowed.latitude, narrowed.longitude)) {
+    return { places: mergePlaces([{ label: `${query}, Berlin`, ...narrowed }], local), outsideBerlin: false };
+  }
+  if (narrowed) return { places: [], outsideBerlin: local.length === 0 };
+  return { places: local, outsideBerlin: false };
+}
+
+function namedBerlin(places: RankedPlace[], query: string) {
+  return places.filter((place) => place.berlin && (closeName(query, place.name) || startsWord(query, place.name)));
+}
+
+function outsideHit(places: RankedPlace[], query: string) {
+  return places.find((place) => {
+    if (place.berlin) return false;
+    if (closeName(query, place.name)) return true;
+    return startsWord(query, place.name) && ["city", "town", "administrative", "municipality"].includes(place.kind);
+  });
+}
+
 export async function searchBerlinPlaces(query: string) {
-  const needle = query.trim().toLowerCase();
-  if (needle.length < 2) return [];
-  const local = BERLIN_AREAS.filter((place) => place.label.toLowerCase().includes(needle)).slice(0, 6);
-  if (local.length > 0 && !/^\d{5}$/.test(needle)) return local;
-  const point = await geocode(/^\d{5}$/.test(needle) ? `${needle} Berlin` : `${query.trim()}, Berlin`);
-  if (!point || !inBerlin(point.latitude, point.longitude)) return local;
-  const label = /^\d{5}$/.test(needle) ? `${needle}, Berlin` : `${query.trim()}, Berlin`;
-  if (local.some((place) => place.label.toLowerCase() === label.toLowerCase())) return local;
-  return [{ label, latitude: point.latitude, longitude: point.longitude }, ...local].slice(0, 6);
+  const trimmed = query.trim();
+  const needle = trimmed.toLowerCase();
+  if (needle.length < 2) return { places: [] as PlaceHit[], outsideBerlin: false };
+  const cached = placeCache.get(needle);
+  if (cached) return cached;
+
+  const local = matchingAreas(needle);
+  const [biased, open] = await Promise.all([photonSearch(trimmed, true), photonSearch(trimmed, false)]);
+  let result: { places: PlaceHit[]; outsideBerlin: boolean };
+  if (biased === null && open === null) {
+    result = await nominatimPlace(trimmed, local);
+  } else {
+    const berlin = mergePlaces(
+      namedBerlin(biased ?? [], trimmed).map(({ label, latitude, longitude }) => ({ label, latitude, longitude })),
+      local,
+    );
+    if (berlin.length > 0) result = { places: berlin, outsideBerlin: false };
+    else if (/^\d{5}$/.test(trimmed)) result = await nominatimPlace(trimmed, local);
+    else if (outsideHit(open ?? [], trimmed) || outsideHit(biased ?? [], trimmed)) result = { places: [], outsideBerlin: true };
+    else result = { places: [], outsideBerlin: false };
+  }
+
+  placeCache.set(needle, result);
+  return result;
 }
