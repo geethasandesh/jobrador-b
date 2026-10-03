@@ -17,6 +17,7 @@ import {
 import { optionalUser, userFromRequest } from "./auth.js";
 import { parseCreateLead, parseOrigin, parseSearch, parseVote } from "./parse.js";
 import { listFeaturedNotes, noteForDevice, parseWallNote, reactToNote, stickNote } from "../modules/wall.js";
+import { createConfirmedAccount } from "../auth/accounts.js";
 import { sendBugReport, sendPasswordReset } from "../email/mail.js";
 import { searchBerlinPlaces } from "../ingest/geocode.js";
 import { runIngest } from "../ingest/run.js";
@@ -40,6 +41,27 @@ function clientAddress(header: string | undefined) {
   return header?.split(",")[0]?.trim() || "local";
 }
 
+function allowedBrowserOrigins() {
+  const fromEnv = (process.env.FRONTEND_ORIGIN ?? "http://localhost:3000")
+    .split(",")
+    .map((value) => value.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, ""))
+    .filter(Boolean);
+  return new Set([...fromEnv, "http://localhost:3000", "https://jobrador-f.vercel.app"]);
+}
+
+function allowBrowserOrigin(requestOrigin: string) {
+  const origin = requestOrigin.trim().replace(/\/$/, "");
+  if (!origin) return null;
+  if (allowedBrowserOrigins().has(origin)) return origin;
+  try {
+    const host = new URL(origin).host;
+    if (host === "jobrador-f.vercel.app" || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"))) return origin;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function readEmail(value: unknown) {
   const email = typeof value === "string" ? value.trim() : "";
   if (!email.includes("@") || email.length > 200 || /[\r\n]/.test(email)) return null;
@@ -56,12 +78,11 @@ function cronAuthorized(header: string | undefined) {
 
 export function createApp() {
   const app = new Hono();
-  const origin = process.env.FRONTEND_ORIGIN ?? "http://localhost:3000";
 
   app.use(
     "*",
     cors({
-      origin: origin.split(",").map((value) => value.trim()),
+      origin: (requestOrigin) => allowBrowserOrigin(requestOrigin),
       allowMethods: ["GET", "POST", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
     }),
@@ -221,6 +242,32 @@ export function createApp() {
       return c.json({ error: { code: "NOT_FOUND", message: "Community lead not found" } }, 404);
     }
     return c.json(lead);
+  });
+
+  app.post("/v1/auth/signup", async (c) => {
+    const address = clientAddress(c.req.header("x-forwarded-for"));
+    if (limited(`signup:${address}`, 8, 60 * 60 * 1000)) {
+      return c.json(fail("Too many new accounts from this network. Try again later.", "TOO_MANY"), 429);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const record = body && typeof body === "object" ? (body as { email?: unknown; password?: unknown }) : {};
+    const email = readEmail(record.email);
+    const password = typeof record.password === "string" ? record.password : "";
+    if (!email) return c.json(fail("Use an email address."), 400);
+    if (password.length < 8 || password.length > 72) {
+      return c.json(fail("Use a password of at least 8 characters."), 400);
+    }
+    const created = await createConfirmedAccount(email, password);
+    if ("error" in created && created.error) {
+      const status = created.error.includes("already") ? 409 : 503;
+      return c.json(fail(created.error, status === 409 ? "CONFLICT" : "UNAVAILABLE"), status);
+    }
+    return c.json({ ok: true });
   });
 
   app.post("/v1/auth/forgot-password", async (c) => {
