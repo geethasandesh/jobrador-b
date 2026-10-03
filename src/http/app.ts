@@ -67,6 +67,8 @@ export function createApp() {
     }),
   );
 
+  app.get("/", (c) => c.text("jobrador API is running."));
+
   app.get("/v1/health", async (c) => {
     await pingDatabase();
     return c.json({ ok: true, dataSource: await listingSource(), database: "supabase" });
