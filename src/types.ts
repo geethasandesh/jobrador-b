@@ -10,6 +10,17 @@ export const JOB_TYPES = [
 
 export const LEAD_JOB_TYPES = [...JOB_TYPES, "NOT_SURE"] as const;
 
+export const DISCOVERY_CATEGORIES = [
+  "restaurant",
+  "cafe",
+  "hotel",
+  "retail",
+  "warehouse",
+  "logistics",
+  "cleaning",
+  "other",
+] as const;
+
 export const CATEGORIES = [
   "restaurant",
   "cafe",
@@ -43,7 +54,7 @@ export type Kind = (typeof KINDS)[number];
 export type LanguageFilter = (typeof LANGUAGE_FILTERS)[number];
 export type SalaryFilter = (typeof SALARY_FILTERS)[number];
 export type ListingStatus = "ACTIVE" | "EXPIRED" | "REMOVED" | "UNCERTAIN";
-export type Vote = "yes" | "no" | "unsure";
+export type Vote = "yes" | "no" | "unsure" | "done";
 
 export type LanguageRequirement = {
   german?: "basic" | "required" | "fluent";
@@ -59,10 +70,14 @@ export type Business = {
   area: string;
   latitude: number;
   longitude: number;
+  postalCode?: string;
   phone?: string;
   website?: string;
   openingHours?: string;
   source: string;
+  sourceId?: string;
+  hiringCheckedAt?: string;
+  distanceKm?: number | null;
 };
 
 export type Job = {
@@ -103,7 +118,8 @@ export type CommunityLead = {
   confirmYes: number;
   confirmNo: number;
   confirmUnsure: number;
-  status: "ACTIVE" | "EXPIRED" | "REMOVED";
+  confirmDone: number;
+  status: "ACTIVE" | "EXPIRED" | "REMOVED" | "FILLED";
   language?: LanguageRequirement;
   salaryMin?: number;
   salaryPeriod?: "hour" | "month";
@@ -147,10 +163,15 @@ export type Opportunity = {
   confirmNo?: number;
   confirmUnsure?: number;
   sourceName?: string;
+  hiring?: boolean;
+  linkedJobId?: string;
+  linkedJobTitle?: string;
+  linkedJobType?: string | null;
+  linkedJobIds?: string[];
 };
 
 export type OpportunityListResponse = {
-  dataSource: "mock";
+  dataSource: "mock" | "live";
   center: { latitude: number; longitude: number };
   radiusKm: number;
   total: number;

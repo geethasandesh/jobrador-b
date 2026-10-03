@@ -1,16 +1,25 @@
+import { randomBytes } from "node:crypto";
 import {
   addConfirmation,
   businessesInRadius,
+  countRecentLeads,
   findBusiness,
   findJob,
   findLead,
+  hasLiveJobs,
   insertLead,
   jobsForBusiness,
   jobsInRadius,
+  jobsNear,
   leadsForBusiness,
   leadsInRadius,
 } from "../db/records.js";
 import { distanceKm, roundKm } from "../lib/geo.js";
+import { isLocality, samePlaceName } from "../lib/place-name.js";
+import { findNearbyBusinesses } from "../places/discover.js";
+import { startCircleListings } from "../ingest/circle-listings.js";
+import { startHiringChecks } from "../places/hiring-check.js";
+import { DISCOVERY_CATEGORIES } from "../types.js";
 import {
   hoursLabel,
   languageLabel,
@@ -32,7 +41,11 @@ import type {
   Vote,
 } from "../types.js";
 
-const DATA_SOURCE = "mock" as const;
+export type ListingSource = "mock" | "live";
+
+export async function listingSource(): Promise<ListingSource> {
+  return (await hasLiveJobs()) ? "live" : "mock";
+}
 
 export type CreateLeadInput = {
   businessName: string;
@@ -47,10 +60,11 @@ export type CreateLeadInput = {
   salaryPeriod?: "hour" | "month";
   hoursMin?: number;
   hoursMax?: number;
+  accountId: string;
 };
 
 export type JobDetail = {
-  dataSource: typeof DATA_SOURCE;
+  dataSource: ListingSource;
   job: Job & {
     salaryLabel: string | null;
     languageLabel: string | null;
@@ -61,7 +75,7 @@ export type JobDetail = {
 };
 
 export type LeadDetail = {
-  dataSource: typeof DATA_SOURCE;
+  dataSource: ListingSource;
   lead: CommunityLead & {
     salaryLabel: string | null;
     languageLabel: string | null;
@@ -72,7 +86,7 @@ export type LeadDetail = {
 };
 
 export type BusinessDetail = {
-  dataSource: typeof DATA_SOURCE;
+  dataSource: ListingSource;
   business: Business & { distanceKm: number | null };
   jobs: Array<Job & { salaryLabel: string | null; distanceKm: number | null }>;
   leads: CommunityLead[];
@@ -108,6 +122,11 @@ function toOpportunity(
     confirmNo?: number;
     confirmUnsure?: number;
     sourceName?: string;
+    hiring?: boolean;
+    linkedJobId?: string;
+    linkedJobTitle?: string;
+    linkedJobType?: string | null;
+    linkedJobIds?: string[];
   },
   originLat: number,
   originLng: number,
@@ -135,7 +154,41 @@ function toOpportunity(
     confirmNo: item.confirmNo,
     confirmUnsure: item.confirmUnsure,
     sourceName: item.sourceName,
+    hiring: item.hiring,
+    linkedJobId: item.linkedJobId,
+    linkedJobTitle: item.linkedJobTitle,
+    linkedJobType: item.linkedJobType,
+    linkedJobIds: item.linkedJobIds,
   };
+}
+
+const DOOR_MATCH_KM = 2;
+
+function isJobSeeker(title: string) {
+  return /^(?:suche|sucht)\b/i.test(title) || /\bsucht\s+(?:einen\s+|eine\s+|ein\s+)?mini-?job/i.test(title);
+}
+
+function nearestDoors(jobs: Job[], businesses: Business[]) {
+  const places = businesses.filter((business) => business.source === "osm" || business.source === "mock");
+  const pairs: Array<{ jobId: string; place: Business; gap: number }> = [];
+  for (const job of jobs) {
+    if (job.status !== "ACTIVE" || isJobSeeker(job.title)) continue;
+    const employer = businessById(businesses, job.businessId);
+    if (!employer || employer.source === "osm" || employer.source === "mock") continue;
+    for (const place of places) {
+      if (!samePlaceName(employer.name, place.name)) continue;
+      const gap = distanceKm(job.latitude, job.longitude, place.latitude, place.longitude);
+      if (gap > DOOR_MATCH_KM) continue;
+      pairs.push({ jobId: job.id, place, gap });
+    }
+  }
+  pairs.sort((left, right) => left.gap - right.gap);
+  const assigned = new Map<string, Business>();
+  for (const pair of pairs) {
+    if (assigned.has(pair.jobId)) continue;
+    assigned.set(pair.jobId, pair.place);
+  }
+  return assigned;
 }
 
 function textMatches(query: string, parts: Array<string | undefined>): boolean {
@@ -145,16 +198,27 @@ function textMatches(query: string, parts: Array<string | undefined>): boolean {
 }
 
 export async function searchOpportunities(query: SearchQuery): Promise<OpportunityListResponse> {
+  if (query.kinds.includes("job") || query.kinds.includes("nearby_business")) {
+    void startCircleListings(query.latitude, query.longitude, query.radiusKm);
+  }
+  if (query.kinds.includes("nearby_business")) {
+    void findNearbyBusinesses(query.latitude, query.longitude, query.radiusKm, [
+      ...DISCOVERY_CATEGORIES,
+    ]).catch(() => undefined);
+    startHiringChecks(query.latitude, query.longitude, query.radiusKm);
+  }
   const [businesses, jobs, leads] = await Promise.all([
     businessesInRadius(query.latitude, query.longitude, query.radiusKm),
     jobsInRadius(query.latitude, query.longitude, query.radiusKm),
     leadsInRadius(query.latitude, query.longitude, query.radiusKm),
   ]);
+  const doors = nearestDoors(jobs, businesses);
   const items: Opportunity[] = [];
 
   if (query.kinds.includes("job")) {
     for (const job of jobs) {
       if (job.status !== "ACTIVE") continue;
+      if (isJobSeeker(job.title)) continue;
       const business = businessById(businesses, job.businessId);
       if (query.jobType && job.jobType !== query.jobType) continue;
       if (query.category && job.category !== query.category) continue;
@@ -176,12 +240,13 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
       ) {
         continue;
       }
-      const distance = distanceKm(
-        query.latitude,
-        query.longitude,
-        job.latitude,
-        job.longitude,
-      );
+      const door = doors.get(job.id);
+      const doorInside =
+        door != null &&
+        distanceKm(query.latitude, query.longitude, door.latitude, door.longitude) <= query.radiusKm;
+      const latitude = doorInside ? door.latitude : job.latitude;
+      const longitude = doorInside ? door.longitude : job.longitude;
+      const distance = distanceKm(query.latitude, query.longitude, latitude, longitude);
       if (distance > query.radiusKm) continue;
       items.push(
         toOpportunity(
@@ -200,11 +265,11 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             hoursMin: job.hoursMin,
             hoursMax: job.hoursMax,
             language: job.language,
-            latitude: job.latitude,
-            longitude: job.longitude,
+            latitude,
+            longitude,
             recency: job.postedAt,
-            area: business?.area ?? "",
-            address: business?.address ?? "",
+            area: (doorInside ? door.area : business?.area) || "",
+            address: (doorInside ? door.address : business?.address) || "",
             status: job.status,
             sourceName: job.sourceName,
           },
@@ -272,38 +337,68 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
     }
   }
 
-  if (
-    query.kinds.includes("nearby_business") &&
-    !query.salary &&
-    !query.jobType &&
-    (!query.language || query.language === "unknown")
-  ) {
-    for (const business of businesses) {
-      const hasActiveJob = jobs.some(
-        (job) => job.businessId === business.id && job.status === "ACTIVE",
-      );
-      const hasActiveLead = leads.some(
-        (lead) => lead.businessId === business.id && lead.status === "ACTIVE",
-      );
-      if (hasActiveJob || hasActiveLead) continue;
-      if (query.category && business.category !== query.category) continue;
+  if (query.kinds.includes("nearby_business")) {
+    const claimed = new Set<string>();
+    const restrictive = Boolean(query.salary || query.jobType || (query.language && query.language !== "unknown"));
+    const discovered = businesses.filter((business) => business.source === "osm" || business.source === "mock");
+    const employers = businesses.filter((business) => business.source !== "osm" && business.source !== "mock");
+
+    const pushBusiness = (business: Business, requireJob: boolean) => {
+      if (requireJob && isLocality(business.name)) return;
+      if (query.category && business.category !== query.category) return;
       if (
         !textMatches(query.q ?? "", [
           business.name,
           business.area,
           business.category,
           business.address,
+          business.postalCode,
         ])
       ) {
-        continue;
+        return;
       }
-      const distance = distanceKm(
-        query.latitude,
-        query.longitude,
-        business.latitude,
-        business.longitude,
-      );
-      if (distance > query.radiusKm) continue;
+      const distance = distanceKm(query.latitude, query.longitude, business.latitude, business.longitude);
+      if (distance > query.radiusKm) return;
+      const linked = jobs.filter((job) => {
+        if (job.status !== "ACTIVE" || claimed.has(job.id) || isJobSeeker(job.title)) return false;
+        if (query.jobType && job.jobType !== query.jobType) return false;
+        if (query.language && query.language !== "unknown" && !matchesLanguage(job.language, query.language)) {
+          return false;
+        }
+        if (query.salary && !matchesSalary(job.salaryMin, job.salaryMax, query.salary)) return false;
+        if (job.businessId === business.id) return true;
+        return doors.get(job.id)?.id === business.id;
+      });
+      const looked = Boolean(business.hiringCheckedAt) || linked.length > 0;
+      if (!looked) {
+        items.push(
+          toOpportunity(
+            {
+              id: business.id,
+              kind: "nearby_business",
+              title: business.name,
+              businessId: business.id,
+              businessName: business.name,
+              category: business.category,
+              jobType: null,
+              summary: "Not checked for a public posting yet.",
+              latitude: business.latitude,
+              longitude: business.longitude,
+              recency: null,
+              area: business.area,
+              address: business.address,
+              status: "UNCHECKED",
+              hiring: false,
+            },
+            query.latitude,
+            query.longitude,
+          ),
+        );
+        return;
+      }
+      if (linked.length === 0 && (requireJob || restrictive)) return;
+      for (const job of linked) claimed.add(job.id);
+      const first = linked[0];
       items.push(
         toOpportunity(
           {
@@ -313,20 +408,32 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             businessId: business.id,
             businessName: business.name,
             category: business.category,
-            jobType: null,
-            summary: "No public vacancy found. You can visit and ask if they are hiring.",
+            jobType: first?.jobType ?? null,
+            summary: first
+              ? first.title
+              : business.website
+                ? "No public vacancy found on their website or in the listings we have. You can visit and ask if they are currently hiring."
+                : "No public vacancy found in the listings we have. You can visit and ask if they are currently hiring.",
             latitude: business.latitude,
             longitude: business.longitude,
             recency: null,
             area: business.area,
             address: business.address,
-            status: "NO_VACANCY",
+            status: first ? "HIRING" : "NO_VACANCY",
+            hiring: Boolean(first),
+            linkedJobId: first?.id,
+            linkedJobTitle: first?.title,
+            linkedJobType: first?.jobType ?? null,
+            linkedJobIds: linked.map((job) => job.id),
           },
           query.latitude,
           query.longitude,
         ),
       );
-    }
+    };
+
+    for (const business of discovered) pushBusiness(business, false);
+    for (const business of employers) pushBusiness(business, true);
   }
 
   items.sort((a, b) => {
@@ -339,7 +446,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
   });
 
   return {
-    dataSource: DATA_SOURCE,
+    dataSource: await listingSource(),
     center: { latitude: query.latitude, longitude: query.longitude },
     radiusKm: query.radiusKm,
     total: items.length,
@@ -355,7 +462,7 @@ export async function getJob(
   if (!job) return null;
   const business = await findBusiness(job.businessId);
   return {
-    dataSource: DATA_SOURCE,
+    dataSource: await listingSource(),
     job: {
       ...job,
       salaryLabel: salaryLabel(job.salaryMin, job.salaryMax, job.salaryPeriod),
@@ -377,7 +484,7 @@ export async function getLead(
   if (!lead) return null;
   const business = lead.businessId ? await findBusiness(lead.businessId) : null;
   return {
-    dataSource: DATA_SOURCE,
+    dataSource: await listingSource(),
     lead: {
       ...lead,
       salaryLabel: salaryLabel(lead.salaryMin, undefined, lead.salaryPeriod),
@@ -399,9 +506,20 @@ export async function getBusiness(
 ): Promise<BusinessDetail | null> {
   const business = await findBusiness(id);
   if (!business) return null;
-  const [jobs, leads] = await Promise.all([jobsForBusiness(business.id), leadsForBusiness(business.id)]);
+  const [directJobs, nearbyJobs, leads] = await Promise.all([
+    jobsForBusiness(business.id),
+    jobsNear(business.latitude, business.longitude, 2),
+    leadsForBusiness(business.id),
+  ]);
+  const jobs = [...directJobs];
+  for (const nearby of nearbyJobs) {
+    if (jobs.some((job) => job.id === nearby.job.id)) continue;
+    const sameDoor = nearby.job.businessId === business.id;
+    const closeName = samePlaceName(nearby.businessName, business.name);
+    if (sameDoor || closeName) jobs.push(nearby.job);
+  }
   return {
-    dataSource: DATA_SOURCE,
+    dataSource: await listingSource(),
     business: {
       ...business,
       distanceKm: origin
@@ -426,11 +544,19 @@ export async function getBusiness(
   };
 }
 
-export async function createLead(input: CreateLeadInput): Promise<LeadDetail> {
+const DAILY_LEAD_CAP = 3;
+
+export async function createLead(
+  input: CreateLeadInput,
+): Promise<LeadDetail | { error: string; status: number }> {
+  const recent = await countRecentLeads(input.accountId);
+  if (recent >= DAILY_LEAD_CAP) {
+    return { error: "This account already shared three tips today.", status: 429 };
+  }
   const lead: CommunityLead = {
-    id: `lead_${Date.now().toString(36)}`,
+    id: `lead_${randomBytes(8).toString("hex")}`,
     businessName: input.businessName,
-    title: "Community hiring lead",
+    title: "Hiring tip",
     description: input.description,
     jobType: input.jobType,
     category: input.category,
@@ -443,13 +569,14 @@ export async function createLead(input: CreateLeadInput): Promise<LeadDetail> {
     confirmYes: 0,
     confirmNo: 0,
     confirmUnsure: 0,
+    confirmDone: 0,
     status: "ACTIVE",
     salaryMin: input.salaryMin,
     salaryPeriod: input.salaryPeriod,
     hoursMin: input.hoursMin,
     hoursMax: input.hoursMax,
   };
-  await insertLead(lead);
+  await insertLead(lead, input.accountId);
   const detail = await getLead(lead.id);
   if (!detail) {
     throw new Error("Lead was saved but could not be read back");
@@ -457,8 +584,22 @@ export async function createLead(input: CreateLeadInput): Promise<LeadDetail> {
   return detail;
 }
 
-export async function confirmLead(id: string, vote: Vote): Promise<LeadDetail | null> {
-  const lead = await addConfirmation(id, vote);
-  if (!lead) return null;
-  return getLead(id);
+export async function confirmLead(
+  id: string,
+  vote: Vote,
+  accountId: string,
+): Promise<(LeadDetail & { notice: string }) | null> {
+  const result = await addConfirmation(id, vote, accountId);
+  if (!result) return null;
+  const detail = await getLead(id);
+  if (!detail) return null;
+  const filled = detail.lead.status === "FILLED";
+  let notice = "Recorded. You can change this from the same account.";
+  if (!result.changed) notice = "You already recorded that from this account.";
+  else if (filled && !result.wasFilled) notice = "Updated. Hiring is finished, so this tip leaves the map.";
+  else if (!filled && result.wasFilled) notice = "Updated. This tip is open again.";
+  else if (vote === "done") {
+    notice = "Recorded. Hiring is marked finished when you shared it, or when two accounts say so.";
+  }
+  return { ...detail, notice };
 }

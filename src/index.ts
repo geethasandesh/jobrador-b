@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { loadEnvFile } from "./db/env.js";
 import { migrate } from "./db/migrate.js";
 import { createApp } from "./http/app.js";
+import { startIngestSchedule } from "./ingest/schedule.js";
 
 loadEnvFile();
 
@@ -16,5 +17,6 @@ serve(
   },
   (info) => {
     console.log(`jobrador-b listening on http://localhost:${info.port}`);
+    startIngestSchedule();
   },
 );

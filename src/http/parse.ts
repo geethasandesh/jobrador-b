@@ -208,8 +208,8 @@ export function parseCreateLead(body: unknown): CreateLeadBody | ParseFail {
 export function parseVote(body: unknown): Vote | ParseFail {
   if (!body || typeof body !== "object") return { error: "Expected a JSON object" };
   const status = (body as Record<string, unknown>).status;
-  if (status !== "yes" && status !== "no" && status !== "unsure") {
-    return { error: "status must be yes, no, or unsure" };
+  if (status !== "yes" && status !== "no" && status !== "unsure" && status !== "done") {
+    return { error: "status must be yes, no, unsure, or done" };
   }
   return status;
 }
