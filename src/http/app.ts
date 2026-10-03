@@ -283,7 +283,7 @@ export function createApp() {
     if (limited(`reset:${email}:${address}`, 3, 60 * 60 * 1000)) {
       return c.json(fail("Too many reset emails. Try again later.", "TOO_MANY"), 429);
     }
-    const sent = await sendPasswordReset(email);
+    const sent = await sendPasswordReset(email, c.req.header("origin"));
     if ("error" in sent && sent.error) return c.json(fail(sent.error, "UNAVAILABLE"), 503);
     return c.json({ ok: true });
   });

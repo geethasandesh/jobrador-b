@@ -17,9 +17,40 @@ function mailSettings() {
   return { user, pass };
 }
 
-function siteOrigin() {
+const LIVE_SITE = "https://jobrador-f.vercel.app";
+
+function configuredOrigins() {
   loadEnvFile();
-  return (process.env.FRONTEND_ORIGIN ?? "http://localhost:3000").split(",")[0]?.trim() || "http://localhost:3000";
+  return (process.env.FRONTEND_ORIGIN ?? "")
+    .split(",")
+    .map((value) => value.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+function isLocalOrigin(origin: string) {
+  try {
+    const host = new URL(origin).hostname;
+    return host === "localhost" || host === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function isKnownSite(origin: string) {
+  if (origin === "http://localhost:3000" || origin === "http://127.0.0.1:3000") return true;
+  try {
+    const host = new URL(origin).host;
+    return host === "jobrador-f.vercel.app" || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"));
+  } catch {
+    return false;
+  }
+}
+
+function siteOrigin(requested?: string | null) {
+  const configured = configuredOrigins();
+  const asked = requested?.trim().replace(/\/$/, "") ?? "";
+  if (asked && (configured.includes(asked) || isKnownSite(asked))) return asked;
+  return configured.find((origin) => !isLocalOrigin(origin)) ?? LIVE_SITE;
 }
 
 export async function sendMail(input: { to: string; subject: string; html: string; replyTo?: string }) {
@@ -39,11 +70,11 @@ export async function sendMail(input: { to: string; subject: string; html: strin
   return { ok: true as const };
 }
 
-export async function sendPasswordReset(email: string) {
+export async function sendPasswordReset(email: string, requestedOrigin?: string | null) {
   loadEnvFile();
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ?? "";
   const supabaseUrl = (process.env.SUPABASE_URL ?? "https://auavlxwsnoegelrrehhy.supabase.co").replace(/\/$/, "");
-  const origin = siteOrigin();
+  const origin = siteOrigin(requestedOrigin);
   if (!serviceKey || !mailSettings()) return { error: "Password email is not set up yet." };
 
   let response: Response;
