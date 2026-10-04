@@ -46,7 +46,7 @@ function isKnownSite(origin: string) {
   }
 }
 
-function siteOrigin(requested?: string | null) {
+export function siteOrigin(requested?: string | null) {
   const configured = configuredOrigins();
   const asked = requested?.trim().replace(/\/$/, "") ?? "";
   if (asked && (configured.includes(asked) || isKnownSite(asked))) return asked;
@@ -127,6 +127,25 @@ export async function sendPasswordReset(email: string, requestedOrigin?: string 
   });
   if ("error" in sent) return sent;
   return { ok: true as const };
+}
+
+export async function sendHiringNotice(
+  email: string,
+  input: { placeName: string; titles: string[]; jobUrl: string },
+) {
+  const titles = input.titles.map((title) => `<li>${escapeHtml(title)}</li>`).join("");
+  return sendMail({
+    to: email,
+    subject: `${input.placeName} has a public posting`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #222; max-width: 560px;">
+        <h1 style="font-size: 22px;">A place you saved has a public posting</h1>
+        <p>${escapeHtml(input.placeName)} now has a posting we can open.</p>
+        <ul>${titles}</ul>
+        <p><a href="${escapeHtml(input.jobUrl)}">Open it on the map</a></p>
+      </div>
+    `,
+  });
 }
 
 export async function sendBugReport(input: { message: string; email?: string; page?: string }) {

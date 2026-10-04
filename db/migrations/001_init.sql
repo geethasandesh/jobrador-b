@@ -195,6 +195,73 @@ on conflict (id) do nothing;
 
 update wall_reactions set emoji = '❤️' where emoji = '💛';
 
+create table if not exists referrals (
+  id text primary key,
+  account_id text not null,
+  author_name text not null,
+  message text not null,
+  url text not null,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  created_at timestamptz not null default now(),
+  reviewed_at timestamptz
+);
+
+create index if not exists referrals_account_created_idx on referrals (account_id, created_at);
+create index if not exists referrals_status_created_idx on referrals (status, created_at);
+
+create table if not exists bug_reports (
+  id text primary key,
+  message text not null,
+  reply_email text,
+  page text,
+  created_at timestamptz not null default now()
+);
+
+alter table bug_reports add column if not exists handled_at timestamptz;
+alter table community_leads add column if not exists hidden_at timestamptz;
+
+create table if not exists account_saves (
+  account_id text not null,
+  item_id text not null,
+  kind text not null check (kind in ('job', 'community_lead', 'nearby_business')),
+  created_at timestamptz not null default now(),
+  primary key (account_id, item_id)
+);
+
+create table if not exists account_visits (
+  account_id text not null,
+  item_id text not null,
+  kind text not null check (kind in ('job', 'community_lead', 'nearby_business')),
+  title text not null,
+  subtitle text not null,
+  href text not null,
+  created_at timestamptz not null default now(),
+  primary key (account_id, item_id)
+);
+
+create table if not exists closure_reports (
+  id text primary key,
+  account_id text not null,
+  job_id text not null,
+  business_id text,
+  place_name text not null,
+  job_title text not null,
+  status text not null default 'pending' check (status in ('pending', 'confirmed', 'dismissed')),
+  created_at timestamptz not null default now(),
+  reviewed_at timestamptz
+);
+
+create unique index if not exists closure_reports_pending_idx
+  on closure_reports (account_id, job_id)
+  where status = 'pending';
+
+create table if not exists hiring_notices (
+  account_id text not null,
+  job_id text not null,
+  sent_at timestamptz not null default now(),
+  primary key (account_id, job_id)
+);
+
 create table if not exists sources (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -221,6 +288,12 @@ begin
     'reports',
     'wall_notes',
     'wall_reactions',
+    'referrals',
+    'bug_reports',
+    'account_saves',
+    'account_visits',
+    'closure_reports',
+    'hiring_notices',
     'sources'
   ]
   loop

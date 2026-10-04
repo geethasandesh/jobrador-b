@@ -1,10 +1,32 @@
 import { getSql } from "../db/client.js";
 import { distanceKm } from "../lib/geo.js";
+import { notifyFreshJobs, type FreshJob } from "../modules/hiring-mail.js";
 import { stableId, type NormalizedJob, type NormalizedPlace } from "./model.js";
 
 export async function saveJobs(jobs: NormalizedJob[]) {
   if (jobs.length === 0) return 0;
   const sql = getSql();
+  const externalIds = jobs.map((job) => job.externalId).filter((id): id is string => Boolean(id));
+  const existing = externalIds.length
+    ? await sql<{ source_name: string; external_id: string; status: string }[]>`
+        select source_name, external_id, status from jobs where external_id in ${sql(externalIds)}
+      `
+    : [];
+  const alreadyActive = new Set(
+    existing.filter((row) => row.status === "ACTIVE").map((row) => `${row.source_name}|${row.external_id}`),
+  );
+  const fresh: FreshJob[] = jobs
+    .filter((job) => !alreadyActive.has(`${job.sourceName}|${job.externalId}`))
+    .map((job) => ({
+      jobId: stableId("job", `${job.sourceName}|${job.externalId}`),
+      businessId:
+        job.businessId ??
+        stableId("biz", `${job.sourceName}|${job.company.toLowerCase()}|${job.latitude.toFixed(4)}|${job.longitude.toFixed(4)}`),
+      title: job.title,
+      company: job.company,
+      latitude: job.latitude,
+      longitude: job.longitude,
+    }));
   await sql.begin(async (tx) => {
     for (const job of jobs) {
       const businessId =
@@ -92,6 +114,7 @@ export async function saveJobs(jobs: NormalizedJob[]) {
       `;
     }
   });
+  await notifyFreshJobs(fresh).catch(() => undefined);
   return jobs.length;
 }
 

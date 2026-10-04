@@ -1,7 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { loadEnvFile } from "../db/env.js";
 
-type AuthUser = { id: string };
+type AuthUser = { id: string; email: string };
 
 function loadAuthEnv() {
   const path = fileURLToPath(new URL("../../.env", import.meta.url));
@@ -52,7 +53,18 @@ export async function userFromRequest(
   }
 
   if (!response.ok) return { status: 401, message: denied };
-  const body = (await response.json()) as { id?: string };
+  const body = (await response.json()) as { id?: string; email?: string };
   if (!body.id) return { status: 401, message: denied };
-  return { id: body.id };
+  return { id: body.id, email: body.email?.trim().toLowerCase() ?? "" };
+}
+
+export function isAdminEmail(email: string) {
+  loadEnvFile();
+  const configured = [process.env.ADMIN_EMAIL ?? "", process.env.ADMIN_EMAILS ?? ""]
+    .join(",")
+    .split(",")
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+  const admins = configured.length > 0 ? configured : (process.env.GMAIL_USER ?? "").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+  return Boolean(email) && admins.includes(email.trim().toLowerCase());
 }

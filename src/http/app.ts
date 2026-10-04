@@ -14,11 +14,33 @@ import {
   listingSource,
   searchOpportunities,
 } from "../modules/catalog.js";
-import { optionalUser, userFromRequest } from "./auth.js";
+import { isAdminEmail, optionalUser, userFromRequest } from "./auth.js";
 import { parseCreateLead, parseOrigin, parseSearch, parseVote } from "./parse.js";
 import { listFeaturedNotes, noteForDevice, parseWallNote, reactToNote, stickNote } from "../modules/wall.js";
+import {
+  createReferral,
+  listReferralQueue,
+  listReferrals,
+  parseReferral,
+  pendingCount,
+  reviewReferral,
+} from "../modules/referrals.js";
 import { createConfirmedAccount } from "../auth/accounts.js";
 import { sendBugReport, sendPasswordReset } from "../email/mail.js";
+import { adminOverview, saveBugReport } from "../modules/admin.js";
+import { addVisit, mergeLibrary, readLibrary, removeVisit, setSaved } from "../modules/library.js";
+import {
+  adminPlaces,
+  listAdminNotes,
+  listAdminPosts,
+  listClosures,
+  markBugHandled,
+  myClosure,
+  reportClosed,
+  reviewClosure,
+  setNoteHidden,
+  setPostHidden,
+} from "../modules/moderation.js";
 import { searchBerlinPlaces } from "../ingest/geocode.js";
 import { runIngest } from "../ingest/run.js";
 
@@ -46,7 +68,7 @@ function allowedBrowserOrigins() {
     .split(",")
     .map((value) => value.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, ""))
     .filter(Boolean);
-  return new Set([...fromEnv, "http://localhost:3000", "https://jobrador-f.vercel.app"]);
+  return new Set([...fromEnv, "http://localhost:3000", "http://127.0.0.1:3000", "https://jobrador-f.vercel.app"]);
 }
 
 function allowBrowserOrigin(requestOrigin: string) {
@@ -311,9 +333,254 @@ export function createApp() {
       replyTo = parsed;
     }
     const page = typeof record.page === "string" ? record.page.trim().slice(0, 200) : "";
-    const sent = await sendBugReport({ message, email: replyTo, page });
-    if ("error" in sent && sent.error) return c.json(fail(sent.error, "UNAVAILABLE"), 503);
+    try {
+      await saveBugReport({ message, email: replyTo, page });
+    } catch {
+      return c.json(fail("The bug report could not be saved.", "UNAVAILABLE"), 503);
+    }
+    await sendBugReport({ message, email: replyTo, page });
     return c.json({ ok: true });
+  });
+
+  app.get("/v1/admin/overview", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    return c.json(await adminOverview(user.id));
+  });
+
+  app.get("/v1/referrals", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to read referrals.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    const admin = isAdminEmail(user.email);
+    return c.json({
+      referrals: await listReferrals(user.id),
+      admin,
+      pendingCount: admin ? await pendingCount() : 0,
+    });
+  });
+
+  app.post("/v1/referrals", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to send a referral.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (limited(`referral:${user.id}`, 8, 60 * 60 * 1000)) {
+      return c.json(fail("Too many referrals from this account. Try again later.", "TOO_MANY"), 429);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const parsed = parseReferral(body);
+    if ("error" in parsed) return c.json(fail(parsed.error), 400);
+    const created = await createReferral(user.id, user.email, parsed);
+    if ("error" in created) {
+      return c.json(fail(created.error, created.status === 429 ? "TOO_MANY" : "BAD_REQUEST"), created.status as 429 | 400 | 500);
+    }
+    return c.json(created, 201);
+  });
+
+  app.get("/v1/referrals/queue", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to review referrals.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("Only an admin can review referrals.", "FORBIDDEN"), 403);
+    return c.json(await listReferralQueue(user.id));
+  });
+
+  app.post("/v1/referrals/:id/review", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to review referrals.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("Only an admin can review referrals.", "FORBIDDEN"), 403);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const action = body && typeof body === "object" ? (body as { action?: unknown }).action : null;
+    if (action !== "approve" && action !== "reject") return c.json(fail("action must be approve or reject"), 400);
+    const id = c.req.param("id");
+    if (!id) return c.json(fail("That referral is not in the queue.", "NOT_FOUND"), 404);
+    const updated = await reviewReferral(id, user.id, action);
+    if ("error" in updated) {
+      return c.json(fail(updated.error, updated.status === 404 ? "NOT_FOUND" : "BAD_REQUEST"), updated.status as 404 | 400);
+    }
+    return c.json(updated);
+  });
+
+  app.get("/v1/library", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to see saved jobs.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    return c.json(await readLibrary(user.id));
+  });
+
+  app.post("/v1/library/merge", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to save a job.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const record = body && typeof body === "object" ? (body as { saved?: unknown; visits?: unknown }) : {};
+    return c.json(await mergeLibrary(user.id, record));
+  });
+
+  app.post("/v1/library/saved", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to save a job.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const record = body && typeof body === "object" ? (body as { id?: unknown; saved?: unknown; kind?: unknown }) : {};
+    const kind = record.kind === "job" || record.kind === "community_lead" || record.kind === "nearby_business" ? record.kind : null;
+    const updated = await setSaved(user.id, typeof record.id === "string" ? record.id : "", record.saved !== false, kind);
+    if ("error" in updated && updated.error) return c.json(fail(updated.error), 400);
+    return c.json(updated);
+  });
+
+  app.post("/v1/library/visits", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to keep a visit list.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const updated = await addVisit(user.id, body);
+    if ("error" in updated && updated.error) return c.json(fail(updated.error), 400);
+    return c.json(updated);
+  });
+
+  app.delete("/v1/library/visits/:id", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to keep a visit list.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    const updated = await removeVisit(user.id, c.req.param("id") ?? "");
+    if ("error" in updated && updated.error) return c.json(fail(updated.error), 400);
+    return c.json(updated);
+  });
+
+  app.get("/v1/closures", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to report a closed posting.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    const jobId = c.req.query("jobId") ?? "";
+    return c.json({ report: await myClosure(user.id, jobId) });
+  });
+
+  app.post("/v1/closures", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to report a closed posting.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (limited(`close:${user.id}`, 10, 24 * 60 * 60 * 1000)) {
+      return c.json(fail("Too many closure reports today.", "TOO_MANY"), 429);
+    }
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const jobId = body && typeof body === "object" ? (body as { jobId?: unknown }).jobId : "";
+    if (typeof jobId !== "string" || !jobId) return c.json(fail("That posting is not on the map."), 400);
+    const created = await reportClosed(user.id, jobId);
+    if ("error" in created) {
+      const status = created.status === 429 ? 429 : created.status === 404 ? 404 : 400;
+      return c.json(fail(created.error, status === 429 ? "TOO_MANY" : "BAD_REQUEST"), status);
+    }
+    return c.json(created, 201);
+  });
+
+  app.get("/v1/admin/places", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    return c.json(await adminPlaces(c.req.query("tone"), c.req.query("q") ?? ""));
+  });
+
+  app.get("/v1/admin/posts", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    return c.json({ posts: await listAdminPosts() });
+  });
+
+  app.post("/v1/admin/posts/:id", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const hidden = body && typeof body === "object" ? (body as { hidden?: unknown }).hidden : null;
+    if (typeof hidden !== "boolean") return c.json(fail("hidden must be true or false"), 400);
+    const updated = await setPostHidden(c.req.param("id") ?? "", hidden);
+    if ("error" in updated && updated.error) return c.json(fail(updated.error, "NOT_FOUND"), updated.status ?? 400);
+    return c.json(updated);
+  });
+
+  app.get("/v1/admin/wall", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    return c.json({ notes: await listAdminNotes() });
+  });
+
+  app.post("/v1/admin/wall/:id", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const hidden = body && typeof body === "object" ? (body as { hidden?: unknown }).hidden : null;
+    if (typeof hidden !== "boolean") return c.json(fail("hidden must be true or false"), 400);
+    const updated = await setNoteHidden(c.req.param("id") ?? "", hidden);
+    if ("error" in updated && updated.error) return c.json(fail(updated.error, "NOT_FOUND"), updated.status ?? 400);
+    return c.json(updated);
+  });
+
+  app.post("/v1/admin/bugs/:id/handle", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    const updated = await markBugHandled(c.req.param("id") ?? "");
+    if ("error" in updated && updated.error) return c.json(fail(updated.error, "NOT_FOUND"), updated.status ?? 400);
+    return c.json(updated);
+  });
+
+  app.get("/v1/admin/closures", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    return c.json(await listClosures());
+  });
+
+  app.post("/v1/admin/closures/:id/review", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in to open the admin dashboard.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    if (!isAdminEmail(user.email)) return c.json(fail("This account cannot open the admin dashboard.", "FORBIDDEN"), 403);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const action = body && typeof body === "object" ? (body as { action?: unknown }).action : null;
+    if (action !== "confirm" && action !== "dismiss") return c.json(fail("action must be confirm or dismiss"), 400);
+    const updated = await reviewClosure(c.req.param("id") ?? "", action);
+    if ("error" in updated && updated.error) return c.json(fail(updated.error, "NOT_FOUND"), updated.status ?? 400);
+    return c.json(updated);
   });
 
   app.get("/v1/ingest", async (c) => {
