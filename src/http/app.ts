@@ -68,7 +68,21 @@ function allowedBrowserOrigins() {
     .split(",")
     .map((value) => value.trim().replace(/^['"]|['"]$/g, "").replace(/\/$/, ""))
     .filter(Boolean);
-  return new Set([...fromEnv, "http://localhost:3000", "http://127.0.0.1:3000", "https://jobrador-f.vercel.app"]);
+  return new Set([
+    ...fromEnv,
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "https://jobrador-f.vercel.app",
+    "https://jobrador.online",
+    "https://www.jobrador.online",
+  ]);
+}
+
+function isJobradorHost(host: string) {
+  return host === "jobrador.online"
+    || host === "www.jobrador.online"
+    || host === "jobrador-f.vercel.app"
+    || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"));
 }
 
 function allowBrowserOrigin(requestOrigin: string) {
@@ -76,8 +90,7 @@ function allowBrowserOrigin(requestOrigin: string) {
   if (!origin) return null;
   if (allowedBrowserOrigins().has(origin)) return origin;
   try {
-    const host = new URL(origin).host;
-    if (host === "jobrador-f.vercel.app" || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"))) return origin;
+    if (isJobradorHost(new URL(origin).host)) return origin;
   } catch {
     return null;
   }

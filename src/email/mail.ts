@@ -17,7 +17,7 @@ function mailSettings() {
   return { user, pass };
 }
 
-const LIVE_SITE = "https://jobrador-f.vercel.app";
+const LIVE_SITE = "https://www.jobrador.online";
 
 function configuredOrigins() {
   loadEnvFile();
@@ -40,7 +40,10 @@ function isKnownSite(origin: string) {
   if (origin === "http://localhost:3000" || origin === "http://127.0.0.1:3000") return true;
   try {
     const host = new URL(origin).host;
-    return host === "jobrador-f.vercel.app" || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"));
+    return host === "jobrador.online"
+      || host === "www.jobrador.online"
+      || host === "jobrador-f.vercel.app"
+      || (host.startsWith("jobrador-f") && host.endsWith(".vercel.app"));
   } catch {
     return false;
   }
