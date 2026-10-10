@@ -150,6 +150,7 @@ export async function fetchKleinanzeigenNear(
   radiusKm: number,
   places: Array<{ id: string; label: string }>,
   onJob: (job: NormalizedJob) => Promise<void>,
+  onOpened?: () => Promise<void>,
 ) {
   for (const place of places.slice(0, 3)) {
     const slug = slugFrom(place.label);
@@ -166,6 +167,7 @@ export async function fetchKleinanzeigenNear(
         const gap = distanceKm(latitude, longitude, job.latitude, job.longitude);
         if (gap <= radiusKm) await onJob(job);
       },
+      onOpened,
     );
   }
 }
@@ -192,12 +194,18 @@ async function collectKleinanzeigen(
   maxDetails: number,
   focus: { latitude: number; longitude: number; radiusKm: number } | undefined,
   onJob: (job: NormalizedJob) => Promise<void>,
+  onOpened?: () => Promise<void>,
 ) {
   const seen = new Map<string, Hit>();
   for (const url of urls) {
     try {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
       if (!response.ok) continue;
+      if (onOpened) {
+        const opened = onOpened;
+        onOpened = undefined;
+        await opened();
+      }
       for (const hit of hitsFrom(await response.text())) {
         if (keep(hit)) seen.set(hit.id, hit);
       }

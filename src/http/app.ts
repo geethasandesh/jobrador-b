@@ -139,7 +139,12 @@ export function createApp() {
   app.get("/v1/opportunities", async (c) => {
     const parsed = parseSearch(new URL(c.req.url));
     if ("error" in parsed) return c.json(fail(parsed.error), 400);
-    return c.json(await searchOpportunities(parsed));
+    try {
+      return c.json(await searchOpportunities(parsed));
+    } catch (error) {
+      console.error(error);
+      return c.json(fail("The map could not load this circle. Try again."), 500);
+    }
   });
 
   app.get("/v1/jobs/:id", async (c) => {

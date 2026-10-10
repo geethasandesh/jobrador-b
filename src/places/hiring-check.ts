@@ -20,9 +20,11 @@ type Row = {
 
 export function startHiringChecks(latitude: number, longitude: number, radiusKm: number) {
   const key = `${latitude.toFixed(2)}:${longitude.toFixed(2)}:${Math.round(radiusKm)}`;
-  if (circles.has(key)) return;
+  if (circles.has(key)) return Promise.resolve();
   circles.add(key);
-  void checkCircle(latitude, longitude, radiusKm).finally(() => circles.delete(key));
+  return checkCircle(latitude, longitude, radiusKm)
+    .catch(() => undefined)
+    .finally(() => circles.delete(key));
 }
 
 async function checkCircle(latitude: number, longitude: number, radiusKm: number) {

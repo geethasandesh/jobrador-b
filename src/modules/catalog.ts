@@ -21,6 +21,7 @@ import { distanceKm, roundKm } from "../lib/geo.js";
 import { isLocality, samePlaceName } from "../lib/place-name.js";
 import { findNearbyBusinesses } from "../places/discover.js";
 import { circleListingsReady, startCircleListings } from "../ingest/circle-listings.js";
+import { keepAlive } from "../http/keep-alive.js";
 import { readableWebsite } from "../ingest/career-pages.js";
 import { startHiringChecks } from "../places/hiring-check.js";
 import { DISCOVERY_CATEGORIES } from "../types.js";
@@ -212,8 +213,8 @@ function nearestDoors(jobs: Job[], businesses: Business[]) {
   return assigned;
 }
 
-function clip(value: string) {
-  const text = value.replace(/\s+/g, " ").trim();
+function clip(value: string | null | undefined) {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 }
 
@@ -234,13 +235,15 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
     leadsInRadius(query.latitude, query.longitude, query.radiusKm, withText),
   ]);
   if (query.kinds.includes("job") || query.kinds.includes("nearby_business")) {
-    void startCircleListings(query.latitude, query.longitude, query.radiusKm);
+    keepAlive(startCircleListings(query.latitude, query.longitude, query.radiusKm));
   }
   if (query.kinds.includes("nearby_business")) {
-    void findNearbyBusinesses(query.latitude, query.longitude, query.radiusKm, [
-      ...DISCOVERY_CATEGORIES,
-    ]).catch(() => undefined);
-    startHiringChecks(query.latitude, query.longitude, query.radiusKm);
+    keepAlive(
+      findNearbyBusinesses(query.latitude, query.longitude, query.radiusKm, [
+        ...DISCOVERY_CATEGORIES,
+      ]).catch(() => undefined),
+    );
+    keepAlive(startHiringChecks(query.latitude, query.longitude, query.radiusKm));
   }
   const doors = nearestDoors(jobs, businesses);
   const items: Opportunity[] = [];

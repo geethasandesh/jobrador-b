@@ -68,12 +68,18 @@ export async function fetchJobsAndJoyNear(
   radiusKm: number,
   hints: string[],
   onJob: (job: NormalizedJob) => Promise<void>,
+  onOpened?: () => Promise<void>,
 ) {
   const seen = new Map<string, Row>();
   for (const url of lists) {
     try {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(20_000) });
       if (!response.ok) continue;
+      if (onOpened) {
+        const opened = onOpened;
+        onOpened = undefined;
+        await opened();
+      }
       for (const row of rowsFrom(await response.text())) seen.set(row.id, row);
     } catch {
       continue;

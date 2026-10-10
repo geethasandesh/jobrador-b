@@ -53,7 +53,9 @@ export function startCircleListings(latitude: number, longitude: number, radiusK
   const key = `${latitude.toFixed(2)}:${longitude.toFixed(2)}:${Math.round(radiusKm)}`;
   const existing = inflight.get(key);
   if (existing) return existing;
-  const run = searchCircle(latitude, longitude, radiusKm).finally(() => inflight.delete(key));
+  const run = searchCircle(latitude, longitude, radiusKm)
+    .catch(() => undefined)
+    .finally(() => inflight.delete(key));
   inflight.set(key, run);
   return run;
 }
@@ -84,7 +86,6 @@ async function searchCircle(latitude: number, longitude: number, radiusKm: numbe
     places.push(place);
     if (places.length >= 3) break;
   }
-  if (places.length === 0) return;
 
   const hints = hintTokens([
     ...places.map((place) => place.label),
@@ -95,10 +96,15 @@ async function searchCircle(latitude: number, longitude: number, radiusKm: numbe
   const flush = async (job: NormalizedJob) => {
     await saveJobs([job]);
   };
+  let saved = false;
+  const mark = async () => {
+    if (saved) return;
+    saved = true;
+    await remember(id, latitude, longitude, radius);
+  };
 
-  await fetchKleinanzeigenNear(latitude, longitude, radius, places, flush);
-  await fetchJobsAndJoyNear(latitude, longitude, radius, hints, flush);
-  await remember(id, latitude, longitude, radius);
+  if (places.length > 0) await fetchKleinanzeigenNear(latitude, longitude, radius, places, flush, mark);
+  await fetchJobsAndJoyNear(latitude, longitude, radius, hints, flush, mark);
 }
 
 function hintTokens(values: string[]) {
