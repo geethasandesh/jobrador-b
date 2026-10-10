@@ -252,8 +252,18 @@ async function nominatimPlace(query: string, local: PlaceHit[]) {
   return { places: local, outsideBerlin: false };
 }
 
+function typedPrefix(query: string, name: string) {
+  const left = fold(query);
+  if (left.length < 3) return false;
+  return name.split(/[\s\-/]+/).some((word) => fold(word).startsWith(left)) || fold(name).startsWith(left);
+}
+
 function namedBerlin(places: RankedPlace[], query: string) {
   return places.filter((place) => place.berlin && (closeName(query, place.name) || startsWord(query, place.name)));
+}
+
+function prefixBerlin(places: RankedPlace[], query: string) {
+  return places.filter((place) => place.berlin && typedPrefix(query, place.name));
 }
 
 function outsideHit(places: RankedPlace[], query: string) {
@@ -277,14 +287,13 @@ export async function searchBerlinPlaces(query: string) {
   if (biased === null && open === null) {
     result = await nominatimPlace(trimmed, local);
   } else {
-    const berlin = mergePlaces(
-      namedBerlin(biased ?? [], trimmed).map(({ label, latitude, longitude }) => ({ label, latitude, longitude })),
-      local,
-    );
+    const hit = ({ label, latitude, longitude }: RankedPlace) => ({ label, latitude, longitude });
+    const berlin = mergePlaces(namedBerlin(biased ?? [], trimmed).map(hit), local);
+    const outside = Boolean(outsideHit(open ?? [], trimmed) || outsideHit(biased ?? [], trimmed));
     if (berlin.length > 0) result = { places: berlin, outsideBerlin: false };
     else if (/^\d{5}$/.test(trimmed)) result = await nominatimPlace(trimmed, local);
-    else if (outsideHit(open ?? [], trimmed) || outsideHit(biased ?? [], trimmed)) result = { places: [], outsideBerlin: true };
-    else result = { places: [], outsideBerlin: false };
+    else if (outside) result = { places: [], outsideBerlin: true };
+    else result = { places: mergePlaces(prefixBerlin(biased ?? [], trimmed).map(hit), []), outsideBerlin: false };
   }
 
   placeCache.set(needle, result);
