@@ -20,7 +20,8 @@ import {
 import { distanceKm, roundKm } from "../lib/geo.js";
 import { isLocality, samePlaceName } from "../lib/place-name.js";
 import { findNearbyBusinesses } from "../places/discover.js";
-import { startCircleListings } from "../ingest/circle-listings.js";
+import { circleListingsReady, startCircleListings } from "../ingest/circle-listings.js";
+import { readableWebsite } from "../ingest/career-pages.js";
 import { startHiringChecks } from "../places/hiring-check.js";
 import { DISCOVERY_CATEGORIES } from "../types.js";
 import {
@@ -175,14 +176,27 @@ function isJobSeeker(title: string) {
   return /^(?:suche|sucht)\b/i.test(title) || /\bsucht\s+(?:einen\s+|eine\s+|ein\s+)?mini-?job/i.test(title);
 }
 
+function nameToken(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9äöüß]+/g, " ").trim().split(" ")[0] ?? "";
+}
+
 function nearestDoors(jobs: Job[], businesses: Business[]) {
-  const places = businesses.filter((business) => business.source === "osm" || business.source === "mock");
+  const byToken = new Map<string, Business[]>();
+  for (const place of businesses) {
+    if (place.source !== "osm" && place.source !== "mock") continue;
+    const token = nameToken(place.name);
+    if (token.length < 3) continue;
+    const group = byToken.get(token);
+    if (group) group.push(place);
+    else byToken.set(token, [place]);
+  }
   const pairs: Array<{ jobId: string; place: Business; gap: number }> = [];
   for (const job of jobs) {
     if (job.status !== "ACTIVE" || isJobSeeker(job.title)) continue;
     const employer = businessById(businesses, job.businessId);
     if (!employer || employer.source === "osm" || employer.source === "mock") continue;
-    for (const place of places) {
+    const candidates = byToken.get(nameToken(employer.name)) ?? [];
+    for (const place of candidates) {
       if (!samePlaceName(employer.name, place.name)) continue;
       const gap = distanceKm(job.latitude, job.longitude, place.latitude, place.longitude);
       if (gap > DOOR_MATCH_KM) continue;
@@ -198,6 +212,11 @@ function nearestDoors(jobs: Job[], businesses: Business[]) {
   return assigned;
 }
 
+function clip(value: string) {
+  const text = value.replace(/\s+/g, " ").trim();
+  return text.length > 160 ? `${text.slice(0, 157)}…` : text;
+}
+
 function textMatches(query: string, parts: Array<string | undefined>): boolean {
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
@@ -205,6 +224,15 @@ function textMatches(query: string, parts: Array<string | undefined>): boolean {
 }
 
 export async function searchOpportunities(query: SearchQuery): Promise<OpportunityListResponse> {
+  const withText = Boolean(query.q?.trim());
+  const boardsChecked = query.kinds.includes("nearby_business")
+    ? await circleListingsReady(query.latitude, query.longitude, query.radiusKm).catch(() => false)
+    : false;
+  const [businesses, jobs, leads] = await Promise.all([
+    businessesInRadius(query.latitude, query.longitude, query.radiusKm),
+    jobsInRadius(query.latitude, query.longitude, query.radiusKm, withText),
+    leadsInRadius(query.latitude, query.longitude, query.radiusKm, withText),
+  ]);
   if (query.kinds.includes("job") || query.kinds.includes("nearby_business")) {
     void startCircleListings(query.latitude, query.longitude, query.radiusKm);
   }
@@ -214,11 +242,6 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
     ]).catch(() => undefined);
     startHiringChecks(query.latitude, query.longitude, query.radiusKm);
   }
-  const [businesses, jobs, leads] = await Promise.all([
-    businessesInRadius(query.latitude, query.longitude, query.radiusKm),
-    jobsInRadius(query.latitude, query.longitude, query.radiusKm),
-    leadsInRadius(query.latitude, query.longitude, query.radiusKm),
-  ]);
   const doors = nearestDoors(jobs, businesses);
   const items: Opportunity[] = [];
 
@@ -265,7 +288,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             businessName: business?.name ?? "Unknown business",
             category: job.category,
             jobType: job.jobType,
-            summary: job.descriptionSummary,
+            summary: clip(job.descriptionSummary),
             salaryMin: job.salaryMin,
             salaryMax: job.salaryMax,
             salaryPeriod: job.salaryPeriod,
@@ -321,7 +344,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             businessName: lead.businessName,
             category: lead.category,
             jobType: lead.jobType,
-            summary: lead.description,
+            summary: clip(lead.description),
             salaryMin: lead.salaryMin,
             salaryPeriod: lead.salaryPeriod,
             hoursMin: lead.hoursMin,
@@ -377,7 +400,8 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
         if (job.businessId === business.id) return true;
         return doors.get(job.id)?.id === business.id;
       });
-      const looked = Boolean(business.hiringCheckedAt) || linked.length > 0;
+      const siteChecked = !readableWebsite(business.website) || Boolean(business.hiringCheckedAt);
+      const looked = linked.length > 0 || (boardsChecked && siteChecked);
       if (!looked) {
         items.push(
           toOpportunity(
@@ -389,7 +413,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
               businessName: business.name,
               category: business.category,
               jobType: null,
-              summary: "Not checked for a public posting yet.",
+              summary: "Checking job boards for this place.",
               latitude: business.latitude,
               longitude: business.longitude,
               recency: null,
@@ -419,9 +443,7 @@ export async function searchOpportunities(query: SearchQuery): Promise<Opportuni
             jobType: first?.jobType ?? null,
             summary: first
               ? first.title
-              : business.website
-                ? "No public vacancy found on their website or in the listings we have. You can visit and ask if they are currently hiring."
-                : "No public vacancy found in the listings we have. You can visit and ask if they are currently hiring.",
+              : "The job boards are checked. You can walk in and ask.",
             latitude: business.latitude,
             longitude: business.longitude,
             recency: null,

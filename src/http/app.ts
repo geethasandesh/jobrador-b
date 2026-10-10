@@ -29,6 +29,7 @@ import { createConfirmedAccount } from "../auth/accounts.js";
 import { sendBugReport, sendPasswordReset } from "../email/mail.js";
 import { adminOverview, saveBugReport } from "../modules/admin.js";
 import { addVisit, mergeLibrary, readLibrary, removeVisit, setSaved } from "../modules/library.js";
+import { listAreaAlerts, removeAreaAlert, saveAreaAlert } from "../modules/hiring-mail.js";
 import {
   adminPlaces,
   listAdminNotes,
@@ -477,6 +478,38 @@ export function createApp() {
     const updated = await removeVisit(user.id, c.req.param("id") ?? "");
     if ("error" in updated && updated.error) return c.json(fail(updated.error), 400);
     return c.json(updated);
+  });
+
+  app.get("/v1/area-alerts", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in so we can email you.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    return c.json({ alerts: await listAreaAlerts(user.id) });
+  });
+
+  app.post("/v1/area-alerts", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in so we can email you.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json(fail("Expected JSON"), 400);
+    }
+    const record = body && typeof body === "object" ? (body as { label?: unknown; latitude?: unknown; longitude?: unknown; radiusKm?: unknown }) : {};
+    const saved = await saveAreaAlert(user.id, {
+      label: typeof record.label === "string" ? record.label : "",
+      latitude: Number(record.latitude),
+      longitude: Number(record.longitude),
+      radiusKm: Number(record.radiusKm),
+    });
+    if ("error" in saved && saved.error) return c.json(fail(saved.error), 400);
+    return c.json(saved);
+  });
+
+  app.delete("/v1/area-alerts/:id", async (c) => {
+    const user = await userFromRequest(c.req.header("Authorization"), "Log in so we can email you.");
+    if ("message" in user) return c.json(fail(user.message, "UNAUTHORIZED"), user.status as 401);
+    return c.json(await removeAreaAlert(user.id, decodeURIComponent(c.req.param("id") ?? "")));
   });
 
   app.get("/v1/closures", async (c) => {

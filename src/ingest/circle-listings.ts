@@ -40,6 +40,15 @@ const headers = {
 
 type Place = { id: string; label: string };
 
+export function circleListingsId(latitude: number, longitude: number, radiusKm: number) {
+  const radius = Math.min(Math.max(radiusKm, 0.5), 10);
+  return `listings:v4:${latitude.toFixed(2)}:${longitude.toFixed(2)}:${radius}`;
+}
+
+export async function circleListingsReady(latitude: number, longitude: number, radiusKm: number) {
+  return fresh(circleListingsId(latitude, longitude, radiusKm));
+}
+
 export function startCircleListings(latitude: number, longitude: number, radiusKm: number) {
   const key = `${latitude.toFixed(2)}:${longitude.toFixed(2)}:${Math.round(radiusKm)}`;
   const existing = inflight.get(key);
@@ -50,8 +59,8 @@ export function startCircleListings(latitude: number, longitude: number, radiusK
 }
 
 async function searchCircle(latitude: number, longitude: number, radiusKm: number) {
+  const id = circleListingsId(latitude, longitude, radiusKm);
   const radius = Math.min(Math.max(radiusKm, 0.5), 10);
-  const id = `listings:v4:${latitude.toFixed(2)}:${longitude.toFixed(2)}:${radius}`;
   if (await fresh(id)) return;
 
   const here = await reverseGeocode(latitude, longitude).catch(() => null);

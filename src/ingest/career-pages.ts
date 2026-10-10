@@ -149,7 +149,7 @@ export async function fetchCareerPages(): Promise<NormalizedJob[]> {
     await sleep(400);
     const checked = await checkCareerSite(place);
     if (checked.status === "hiring") jobs.push(checked.job);
-    if (checked.status === "hiring" || checked.status === "none" || checked.status === "no_site") {
+    if (checked.status === "hiring" || checked.status === "none") {
       await getSql()`update businesses set hiring_checked_at = now(), updated_at = now() where id = ${place.id}`;
     }
   }

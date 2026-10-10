@@ -174,29 +174,47 @@ export async function businessesInRadius(latitude: number, longitude: number, ra
   return rows.map(mapBusiness);
 }
 
-export async function jobsInRadius(latitude: number, longitude: number, radiusKm: number) {
+export async function jobsInRadius(latitude: number, longitude: number, radiusKm: number, withText = false) {
   const area = origin(latitude, longitude, radiusKm);
-  const rows = await getSql()<JobRow[]>`
-    select id, business_id, title, job_type, category, description_summary,
-           salary_min, salary_max, salary_period, hours_min, hours_max, language_requirements,
-           latitude, longitude, source_name, source_url, posted_at, status
-    from jobs
-    where status = 'ACTIVE'
-      and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
-  `;
+  const rows = withText
+    ? await getSql()<JobRow[]>`
+        select id, business_id, title, job_type, category, description_summary,
+               salary_min, salary_max, salary_period, hours_min, hours_max, language_requirements,
+               latitude, longitude, source_name, source_url, posted_at, status
+        from jobs
+        where status = 'ACTIVE'
+          and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
+      `
+    : await getSql()<JobRow[]>`
+        select id, business_id, title, job_type, category, '' as description_summary,
+               salary_min, salary_max, salary_period, hours_min, hours_max, language_requirements,
+               latitude, longitude, source_name, source_url, posted_at, status
+        from jobs
+        where status = 'ACTIVE'
+          and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
+      `;
   return rows.map(mapJob);
 }
 
-export async function leadsInRadius(latitude: number, longitude: number, radiusKm: number) {
+export async function leadsInRadius(latitude: number, longitude: number, radiusKm: number, withText = false) {
   const area = origin(latitude, longitude, radiusKm);
-  const rows = await getSql()<LeadRow[]>`
-    select id, business_id, business_name, title, description, job_type, category, address, city, area,
-           latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
-           language_requirements, salary_min, salary_period, hours_min, hours_max
-    from community_leads
-    where status = 'ACTIVE'
-      and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
-  `;
+  const rows = withText
+    ? await getSql()<LeadRow[]>`
+        select id, business_id, business_name, title, description, job_type, category, address, city, area,
+               latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
+               language_requirements, salary_min, salary_period, hours_min, hours_max
+        from community_leads
+        where status = 'ACTIVE'
+          and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
+      `
+    : await getSql()<LeadRow[]>`
+        select id, business_id, business_name, title, '' as description, job_type, category, address, city, area,
+               latitude, longitude, created_at, confirm_yes, confirm_no, confirm_unsure, confirm_done, status, poster,
+               language_requirements, salary_min, salary_period, hours_min, hours_max
+        from community_leads
+        where status = 'ACTIVE'
+          and ST_DWithin(location, ST_SetSRID(ST_MakePoint(${area.longitude}, ${area.latitude}), 4326)::geography, ${area.meters})
+      `;
   return rows.map(mapLead);
 }
 

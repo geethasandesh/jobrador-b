@@ -151,6 +151,27 @@ export async function sendHiringNotice(
   });
 }
 
+export async function sendAreaAlert(
+  email: string,
+  input: { place: string; titles: string[]; mapUrl: string },
+) {
+  const place = input.place.replace(/, Berlin$/, "");
+  const lines = input.titles.map((title) => `<li>${escapeHtml(title)}</li>`).join("");
+  const subject = input.titles.length === 1 ? `New job in ${place}` : `${input.titles.length} new jobs in ${place}`;
+  return sendMail({
+    to: email,
+    subject,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.5; color: #222; max-width: 560px;">
+        <h1 style="font-size: 22px;">${escapeHtml(subject)}</h1>
+        <p>A new green pin appeared in ${escapeHtml(place)}, the area you asked to watch.</p>
+        <ul>${lines}</ul>
+        <p><a href="${escapeHtml(input.mapUrl)}">Open ${escapeHtml(place)} on the map</a></p>
+      </div>
+    `,
+  });
+}
+
 export async function sendBugReport(input: { message: string; email?: string; page?: string }) {
   const config = mailSettings();
   if (!config) return { error: "Bug reports are not set up yet. Email info@grahmind.com instead." };

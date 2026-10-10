@@ -32,6 +32,13 @@ async function checkCircle(latitude: number, longitude: number, radiusKm: number
     select id, name, category, address, city, area, latitude, longitude, website
     from businesses
     where source in ('osm', 'mock')
+      and website is not null
+      and btrim(website) <> ''
+      and website not ilike '%facebook.%'
+      and website not ilike '%instagram.%'
+      and website not ilike '%linktr.ee%'
+      and website not ilike '%google.%'
+      and website not ilike '%maps.app%'
       and (hiring_checked_at is null or hiring_checked_at < now() - interval '7 days')
       and ST_DWithin(
         location,
@@ -64,7 +71,7 @@ async function checkCircle(latitude: number, longitude: number, radiusKm: number
       website: row.website ?? "",
     };
     const checked = await checkCareerSite(place);
-    if (checked.status === "retry") continue;
+    if (checked.status === "retry" || checked.status === "no_site") continue;
     if (checked.status === "hiring") await saveJobs([checked.job]);
     else await clearCareerPost(row.id);
     await getSql()`update businesses set hiring_checked_at = now(), updated_at = now() where id = ${row.id}`;

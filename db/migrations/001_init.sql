@@ -262,6 +262,17 @@ create table if not exists hiring_notices (
   primary key (account_id, job_id)
 );
 
+create table if not exists area_alerts (
+  account_id text not null,
+  id text not null,
+  label text not null,
+  latitude double precision not null,
+  longitude double precision not null,
+  radius_km double precision not null,
+  created_at timestamptz not null default now(),
+  primary key (account_id, id)
+);
+
 create table if not exists sources (
   id uuid primary key default gen_random_uuid(),
   name text not null,
@@ -294,6 +305,7 @@ begin
     'account_visits',
     'closure_reports',
     'hiring_notices',
+    'area_alerts',
     'sources'
   ]
   loop
