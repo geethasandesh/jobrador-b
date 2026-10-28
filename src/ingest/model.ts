@@ -55,7 +55,7 @@ export function stableId(prefix: string, value: string) {
 }
 
 export function inBerlin(latitude: number, longitude: number) {
-  return latitude >= 52.33 && latitude <= 52.68 && longitude >= 13.05 && longitude <= 13.8;
+  return latitude >= 52.338 && latitude <= 52.675 && longitude >= 13.088 && longitude <= 13.761;
 }
 
 export function clip(value: string, max: number) {

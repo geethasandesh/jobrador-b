@@ -648,7 +648,7 @@ export async function confirmLead(
 }
 
 function inBerlin(latitude: number, longitude: number) {
-  return latitude >= 52.33 && latitude <= 52.68 && longitude >= 13.05 && longitude <= 13.77;
+  return latitude >= 52.338 && latitude <= 52.675 && longitude >= 13.088 && longitude <= 13.761;
 }
 
 export async function listMyPosts(accountId: string) {
